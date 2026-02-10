@@ -138,10 +138,6 @@ enum RestoreOption { all, onlyProfiles }
 enum ChipType { action, delete }
 
 enum CommonCardType { plain, filled }
-//
-// extension CommonCardTypeExt on CommonCardType {
-//   CommonCardType get variant => CommonCardType.plain;
-// }
 
 enum ProxiesType { tab, list }
 
@@ -284,6 +280,8 @@ enum FunctionTag {
   saveSharedFile,
 }
 
+/// ✅ DashboardWidget：你新增卡片必须在这里加一个枚举项
+/// 默认显示与否不在这里控制，而在 config.dart 的 defaultDashboardWidgets 控制
 enum DashboardWidget {
   networkSpeed(GridItem(crossAxisCellCount: 8, child: NetworkSpeed())),
   outboundModeV2(GridItem(crossAxisCellCount: 8, child: OutboundModeV2())),
@@ -304,10 +302,10 @@ enum DashboardWidget {
   ),
   intranetIp(GridItem(crossAxisCellCount: 4, child: IntranetIP())),
   memoryInfo(GridItem(crossAxisCellCount: 4, child: MemoryInfo())),
+
+  /// ✅ 你的登录卡片（默认不显示：别加进 config.dart 的 defaultDashboardWidgets）
   loginCard(
     GridItem(crossAxisCellCount: 4, child: LoginCard()),
-    // 如果你只想安卓显示，就改成 platforms: [SupportPlatform.Android],
-    // 如果你只想桌面显示，就 platforms: desktopPlatforms,
     platforms: SupportPlatform.values,
   );
 
@@ -318,9 +316,7 @@ enum DashboardWidget {
 
   static DashboardWidget getDashboardWidget(GridItem gridItem) {
     final dashboardWidgets = DashboardWidget.values;
-    final index = dashboardWidgets.indexWhere(
-      (item) => item.widget == gridItem,
-    );
+    final index = dashboardWidgets.indexWhere((item) => item.widget == gridItem);
     return dashboardWidgets[index];
   }
 }
@@ -379,36 +375,32 @@ enum RuleAction {
 
   static List<RuleAction> get addedRuleActions {
     return RuleAction.values
-        .where(
-          (item) => ![
-            RuleAction.MATCH,
-            RuleAction.RULE_SET,
-            RuleAction.SUB_RULE,
-          ].contains(item),
-        )
+        .where((item) => ![
+              RuleAction.MATCH,
+              RuleAction.RULE_SET,
+              RuleAction.SUB_RULE,
+            ].contains(item))
         .toList();
   }
 }
 
 extension RuleActionExt on RuleAction {
   bool get hasParams => [
-    RuleAction.GEOIP,
-    RuleAction.IP_ASN,
-    RuleAction.SRC_IP_ASN,
-    RuleAction.IP_CIDR,
-    RuleAction.IP_CIDR6,
-    RuleAction.IP_SUFFIX,
-    RuleAction.RULE_SET,
-  ].contains(this);
+        RuleAction.GEOIP,
+        RuleAction.IP_ASN,
+        RuleAction.SRC_IP_ASN,
+        RuleAction.IP_CIDR,
+        RuleAction.IP_CIDR6,
+        RuleAction.IP_SUFFIX,
+        RuleAction.RULE_SET,
+      ].contains(this);
 }
 
 enum OverrideRuleType { override, added }
 
 enum OverwriteType {
-  // none,
   standard,
   script,
-  // custom,
 }
 
 enum RuleTarget { DIRECT, REJECT, MATCH }
