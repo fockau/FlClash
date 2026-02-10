@@ -1,0 +1,705 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// 一个 Dashboard 卡片：
+/// - baseUrl + email + password 登录（只缓存 auth_data/cookie，不缓存密码）
+/// - 获取最新订阅链接
+/// - 历史登录记录（切换/删除）
+/// - 把订阅链接通过回调抛给 FlClash：用于“导入/更新订阅”
+class XBoardLoginCard extends StatefulWidget {
+  const XBoardLoginCard({
+    super.key,
+    required this.onApplySubscription,
+    this.title = 'XBoard',
+  });
+
+  /// 你在 FlClash 里把这个回调接到“URL 导入/更新订阅”的实际逻辑即可
+  final Future<void> Function(String subscribeUrl) onApplySubscription;
+
+  final String title;
+
+  @override
+  State<XBoardLoginCard> createState() => _XBoardLoginCardState();
+}
+
+class _XBoardLoginCardState extends State<XBoardLoginCard> {
+  // ====== UI 控制器 ======
+  final _baseUrlCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
+  final _pwdCtrl = TextEditingController();
+
+  bool _loading = false;
+
+  String? _authData; // "Bearer xxx"
+  String? _cookie; // server_name_session=...
+  String? _lastSubscribeUrl;
+  int _lastFetchedAtMs = 0;
+
+  List<_LoginProfile> _profiles = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLocal();
+  }
+
+  @override
+  void dispose() {
+    _baseUrlCtrl.dispose();
+    _emailCtrl.dispose();
+    _pwdCtrl.dispose();
+    super.dispose();
+  }
+
+  // ================== 工具函数 ==================
+  String _normBaseUrl(String s) {
+    s = s.trim();
+    while (s.endsWith('/')) s = s.substring(0, s.length - 1);
+    return s;
+  }
+
+  String _fmtTime(int ms) {
+    if (ms <= 0) return '-';
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  String _extractAuthData(dynamic loginJson) {
+    if (loginJson is Map) {
+      final data = loginJson['data'];
+      if (data is Map && data['auth_data'] != null) return '${data['auth_data']}';
+    }
+    return '';
+  }
+
+  String _extractSubscribeUrl(dynamic j) {
+    if (j is Map) {
+      final data = j['data'];
+      if (data is Map && data['subscribe_url'] != null) return '${data['subscribe_url']}';
+    }
+    return '';
+  }
+
+  String _extractSessionCookie(String? setCookie) {
+    if (setCookie == null || setCookie.isEmpty) return '';
+    final m = RegExp(r'(server_name_session=[^;]+)').firstMatch(setCookie);
+    return m?.group(1) ?? '';
+  }
+
+  String _makeProfileId(String baseUrl, String email) {
+    final s = '${baseUrl.toLowerCase()}|${email.toLowerCase()}';
+    return s.codeUnits.fold<int>(0, (a, b) => (a * 131 + b) & 0x7fffffff).toString();
+  }
+
+  // ================== 本地存储 ==================
+  static const _kCurrentBaseUrl = 'xboard_current_baseUrl';
+  static const _kCurrentAuthData = 'xboard_current_authData';
+  static const _kCurrentCookie = 'xboard_current_cookie';
+  static const _kCurrentLastSubscribeUrl = 'xboard_current_lastSubscribeUrl';
+  static const _kCurrentProfileId = 'xboard_current_profile_id';
+  static const _kProfiles = 'xboard_profiles_json';
+
+  Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
+
+  Future<void> _loadLocal() async {
+    final sp = await _sp();
+    final base = sp.getString(_kCurrentBaseUrl) ?? '';
+    final a = sp.getString(_kCurrentAuthData) ?? '';
+    final c = sp.getString(_kCurrentCookie) ?? '';
+    final sub = sp.getString(_kCurrentLastSubscribeUrl) ?? '';
+    final pid = sp.getString(_kCurrentProfileId) ?? '';
+
+    final profiles = await _loadProfiles();
+
+    // baseUrl 优先：current -> 第一条历史 -> 空
+    final fallbackBase = profiles.isNotEmpty ? profiles.first.baseUrl : '';
+    _baseUrlCtrl.text = (base.isNotEmpty ? base : fallbackBase);
+
+    setState(() {
+      _authData = a.isEmpty ? null : a;
+      _cookie = c.isEmpty ? null : c;
+      _lastSubscribeUrl = sub.isEmpty ? null : sub;
+      _profiles = profiles;
+    });
+
+    // 有 token 就自动拉一次（可注释掉）
+    if (a.isNotEmpty && (base.isNotEmpty || fallbackBase.isNotEmpty)) {
+      await _fetchSubscribe(showToast: false);
+    }
+
+    // 确保 currentProfileId 合法（防止历史被删）
+    if (pid.isNotEmpty && !_profiles.any((e) => e.id == pid)) {
+      await sp.setString(_kCurrentProfileId, '');
+    }
+  }
+
+  Future<List<_LoginProfile>> _loadProfiles() async {
+    final sp = await _sp();
+    final s = sp.getString(_kProfiles);
+    if (s == null || s.isEmpty) return [];
+    try {
+      final j = jsonDecode(s);
+      if (j is List) {
+        final out = <_LoginProfile>[];
+        for (final it in j) {
+          final p = _LoginProfile.fromJson(it);
+          if (p != null) out.add(p);
+        }
+        out.sort((a, b) => b.savedAtMs.compareTo(a.savedAtMs));
+        return out;
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<void> _saveProfiles(List<_LoginProfile> profiles) async {
+    final sp = await _sp();
+    final list = profiles.map((e) => e.toJson()).toList();
+    await sp.setString(_kProfiles, jsonEncode(list));
+  }
+
+  Future<void> _upsertProfile(_LoginProfile p) async {
+    final profiles = await _loadProfiles();
+    final idx = profiles.indexWhere((x) => x.id == p.id);
+    if (idx >= 0) {
+      profiles[idx] = p;
+    } else {
+      profiles.add(p);
+    }
+    profiles.sort((a, b) => b.savedAtMs.compareTo(a.savedAtMs));
+    await _saveProfiles(profiles);
+    setState(() => _profiles = profiles);
+  }
+
+  Future<void> _deleteProfile(_LoginProfile p) async {
+    final sp = await _sp();
+    final profiles = await _loadProfiles();
+    profiles.removeWhere((x) => x.id == p.id);
+    await _saveProfiles(profiles);
+
+    final cur = sp.getString(_kCurrentProfileId) ?? '';
+    if (cur == p.id) {
+      await sp.setString(_kCurrentProfileId, '');
+    }
+    setState(() => _profiles = profiles);
+  }
+
+  Future<void> _saveCurrent({
+    required String baseUrl,
+    required String authData,
+    required String cookie,
+    required String lastSubscribeUrl,
+    required String profileId,
+  }) async {
+    final sp = await _sp();
+    await sp.setString(_kCurrentBaseUrl, baseUrl);
+    await sp.setString(_kCurrentAuthData, authData);
+    await sp.setString(_kCurrentCookie, cookie);
+    await sp.setString(_kCurrentLastSubscribeUrl, lastSubscribeUrl);
+    await sp.setString(_kCurrentProfileId, profileId);
+  }
+
+  // ================== 网络请求：登录 / 拉订阅 ==================
+  Future<void> _login() async {
+    final base = _normBaseUrl(_baseUrlCtrl.text);
+    final email = _emailCtrl.text.trim();
+    final pwd = _pwdCtrl.text;
+
+    if (!base.startsWith('http://') && !base.startsWith('https://')) {
+      _toast('面板域名必须以 http:// 或 https:// 开头');
+      return;
+    }
+    if (email.isEmpty || pwd.isEmpty) {
+      _toast('请输入邮箱和密码');
+      return;
+    }
+
+    setState(() => _loading = true);
+    try {
+      final uri = Uri.parse('$base/api/v1/passport/auth/login');
+      final resp = await http
+          .post(
+            uri,
+            headers: const {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'email': email, 'password': pwd}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        _toast('登录失败：HTTP ${resp.statusCode}');
+        return;
+      }
+
+      final j = jsonDecode(resp.body);
+      final a = _extractAuthData(j);
+      if (a.isEmpty) {
+        _toast('登录成功但未找到 data.auth_data（返回结构不一致）');
+        return;
+      }
+
+      final c = _extractSessionCookie(resp.headers['set-cookie']);
+      final pid = _makeProfileId(base, email);
+
+      // 更新当前状态
+      setState(() {
+        _authData = a;
+        _cookie = c.isEmpty ? null : c;
+      });
+
+      // 写 current + profile（不保存密码）
+      await _saveCurrent(
+        baseUrl: base,
+        authData: a,
+        cookie: c,
+        lastSubscribeUrl: _lastSubscribeUrl ?? '',
+        profileId: pid,
+      );
+
+      await _upsertProfile(
+        _LoginProfile(
+          id: pid,
+          baseUrl: base,
+          email: email,
+          authData: a,
+          cookie: c,
+          lastSubscribeUrl: _lastSubscribeUrl ?? '',
+          savedAtMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+
+      _toast('登录成功（已写入历史）');
+
+      // 登录后自动拉一次订阅
+      await _fetchSubscribe(showToast: true);
+    } catch (e) {
+      _toast('错误：$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _fetchSubscribe({required bool showToast}) async {
+    final base = _normBaseUrl(_baseUrlCtrl.text);
+    final a = _authData;
+
+    if (a == null || a.isEmpty) {
+      _toast('未登录：请先登录');
+      return;
+    }
+    if (!base.startsWith('http://') && !base.startsWith('https://')) {
+      _toast('面板域名必须以 http:// 或 https:// 开头');
+      return;
+    }
+
+    setState(() => _loading = true);
+    try {
+      final headers = <String, String>{
+        'Accept': 'application/json',
+        'Authorization': a,
+      };
+
+      final c = _cookie;
+      if (c != null && c.isNotEmpty) headers['Cookie'] = c;
+
+      final uri = Uri.parse('$base/api/v1/user/getSubscribe');
+      final resp = await http.get(uri, headers: headers).timeout(const Duration(seconds: 15));
+
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        _toast('获取订阅失败：HTTP ${resp.statusCode}');
+        return;
+      }
+
+      final j = jsonDecode(resp.body);
+      final sub = _extractSubscribeUrl(j);
+      if (sub.isEmpty) {
+        _toast('获取成功，但没有 data.subscribe_url');
+        return;
+      }
+
+      // 更新 cookie（如果后端给了新的 set-cookie）
+      final newCookie = _extractSessionCookie(resp.headers['set-cookie']);
+      final finalCookie = newCookie.isNotEmpty ? newCookie : (_cookie ?? '');
+
+      // 更新 UI
+      setState(() {
+        _lastSubscribeUrl = sub;
+        _cookie = finalCookie.isEmpty ? null : finalCookie;
+        _lastFetchedAtMs = DateTime.now().millisecondsSinceEpoch;
+      });
+
+      // 写 current
+      final sp = await _sp();
+      final pid = sp.getString(_kCurrentProfileId) ?? '';
+      await _saveCurrent(
+        baseUrl: base,
+        authData: a,
+        cookie: finalCookie,
+        lastSubscribeUrl: sub,
+        profileId: pid,
+      );
+
+      // 同步到历史（精准用 currentProfileId）
+      if (pid.isNotEmpty) {
+        final profiles = await _loadProfiles();
+        final idx = profiles.indexWhere((x) => x.id == pid);
+        if (idx >= 0) {
+          profiles[idx] = profiles[idx].copyWith(
+            cookie: finalCookie,
+            lastSubscribeUrl: sub,
+            savedAtMs: DateTime.now().millisecondsSinceEpoch,
+            authData: a,
+          );
+          await _saveProfiles(profiles);
+          setState(() => _profiles = profiles);
+        }
+      }
+
+      if (showToast) _toast('已获取最新订阅链接');
+    } catch (e) {
+      _toast('错误：$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _applyToFlClash() async {
+    // 先拉最新
+    await _fetchSubscribe(showToast: false);
+    final sub = _lastSubscribeUrl;
+    if (sub == null || sub.isEmpty) {
+      _toast('暂无订阅链接');
+      return;
+    }
+
+    try {
+      setState(() => _loading = true);
+      await widget.onApplySubscription(sub);
+      _toast('已提交给 FlClash：订阅导入/更新');
+    } catch (e) {
+      _toast('提交给 FlClash 失败：$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _copySubscribe() async {
+    final s = _lastSubscribeUrl;
+    if (s == null || s.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: s));
+    _toast('已复制订阅链接');
+  }
+
+  Future<void> _useProfile(_LoginProfile p) async {
+    _baseUrlCtrl.text = p.baseUrl;
+    _emailCtrl.text = p.email;
+    _pwdCtrl.text = '';
+
+    setState(() {
+      _authData = p.authData;
+      _cookie = p.cookie.isEmpty ? null : p.cookie;
+      _lastSubscribeUrl = p.lastSubscribeUrl.isEmpty ? null : p.lastSubscribeUrl;
+    });
+
+    await _saveCurrent(
+      baseUrl: p.baseUrl,
+      authData: p.authData,
+      cookie: p.cookie,
+      lastSubscribeUrl: p.lastSubscribeUrl,
+      profileId: p.id,
+    );
+
+    _toast('已切换账号，正在刷新订阅…');
+    await _fetchSubscribe(showToast: false);
+  }
+
+  void _showHistorySheet() {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text('历史登录', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                    ),
+                    TextButton(
+                      onPressed: _loading
+                          ? null
+                          : () async {
+                              final sp = await _sp();
+                              await sp.remove(_kProfiles);
+                              await sp.remove(_kCurrentProfileId);
+                              setState(() => _profiles = []);
+                              if (mounted) Navigator.pop(context);
+                              _toast('已清空历史记录');
+                            },
+                      child: const Text('清空'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (_profiles.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Text('暂无历史记录（登录一次就会自动保存）'),
+                  )
+                else
+                  Flexible(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: _profiles.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (_, i) {
+                        final p = _profiles[i];
+                        return ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text('${p.email.isEmpty ? '(未记录邮箱)' : p.email}  ·  ${p.baseUrl}'),
+                          subtitle: Text(
+                            '保存：${_fmtTime(p.savedAtMs)}'
+                            '${p.lastSubscribeUrl.isNotEmpty ? '\n订阅：${p.lastSubscribeUrl}' : ''}',
+                          ),
+                          isThreeLine: p.lastSubscribeUrl.isNotEmpty,
+                          onTap: _loading
+                              ? null
+                              : () async {
+                                  Navigator.pop(context);
+                                  await _useProfile(p);
+                                },
+                          trailing: IconButton(
+                            tooltip: '删除',
+                            onPressed: _loading
+                                ? null
+                                : () async {
+                                    await _deleteProfile(p);
+                                    if (mounted) setState(() {});
+                                  },
+                            icon: const Icon(Icons.delete_outline),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ================== UI ==================
+  @override
+  Widget build(BuildContext context) {
+    final loggedIn = (_authData != null && _authData!.isNotEmpty);
+    final hasSub = (_lastSubscribeUrl != null && _lastSubscribeUrl!.isNotEmpty);
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 顶部标题 + 历史按钮
+            Row(
+              children: [
+                Expanded(
+                  child: Text(widget.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                ),
+                IconButton(
+                  tooltip: '历史登录',
+                  onPressed: _loading ? null : _showHistorySheet,
+                  icon: Badge(
+                    isLabelVisible: _profiles.isNotEmpty,
+                    label: Text('${_profiles.length}'),
+                    child: const Icon(Icons.history),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // baseUrl（为了多站点切换必须要有）
+            TextField(
+              controller: _baseUrlCtrl,
+              enabled: !_loading,
+              decoration: const InputDecoration(
+                labelText: '面板域名',
+                hintText: 'https://example.com',
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // 邮箱 / 密码
+            TextField(
+              controller: _emailCtrl,
+              enabled: !_loading,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(labelText: '邮箱'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _pwdCtrl,
+              enabled: !_loading,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: '密码（不会保存）'),
+            ),
+            const SizedBox(height: 10),
+
+            // 登录 + 获取订阅并导入
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _loading ? null : _login,
+                    child: Text(_loading ? '处理中…' : '登录'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton.tonal(
+                    onPressed: (!loggedIn || _loading) ? null : _applyToFlClash,
+                    child: Text(_loading ? '处理中…' : '更新订阅并导入'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+
+            // 状态 + 订阅展示
+            Row(
+              children: [
+                Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    loggedIn ? '已登录（auth_data 已缓存）' : '未登录',
+                    style: TextStyle(color: loggedIn ? Colors.green : Theme.of(context).hintColor),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '仅刷新订阅',
+                  onPressed: (!loggedIn || _loading) ? null : () => _fetchSubscribe(showToast: true),
+                  icon: const Icon(Icons.refresh),
+                ),
+              ],
+            ),
+
+            if (hasSub) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: SelectableText(
+                  _lastSubscribeUrl!,
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '最后刷新：${_fmtTime(_lastFetchedAtMs)}',
+                      style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _loading ? null : _copySubscribe,
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('复制'),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// ==================== 历史登录数据模型（卡片内部用） ====================
+class _LoginProfile {
+  final String id; // baseUrl|email hash
+  final String baseUrl;
+  final String email;
+  final String authData; // "Bearer xxxx"
+  final String cookie; // server_name_session=...
+  final String lastSubscribeUrl;
+  final int savedAtMs;
+
+  const _LoginProfile({
+    required this.id,
+    required this.baseUrl,
+    required this.email,
+    required this.authData,
+    required this.cookie,
+    required this.lastSubscribeUrl,
+    required this.savedAtMs,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'baseUrl': baseUrl,
+        'email': email,
+        'authData': authData,
+        'cookie': cookie,
+        'lastSubscribeUrl': lastSubscribeUrl,
+        'savedAtMs': savedAtMs,
+      };
+
+  static _LoginProfile? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    final id = (j['id'] ?? '').toString();
+    final baseUrl = (j['baseUrl'] ?? '').toString();
+    final email = (j['email'] ?? '').toString();
+    final authData = (j['authData'] ?? '').toString();
+    if (id.isEmpty || baseUrl.isEmpty || authData.isEmpty) return null;
+    return _LoginProfile(
+      id: id,
+      baseUrl: baseUrl,
+      email: email,
+      authData: authData,
+      cookie: (j['cookie'] ?? '').toString(),
+      lastSubscribeUrl: (j['lastSubscribeUrl'] ?? '').toString(),
+      savedAtMs: int.tryParse((j['savedAtMs'] ?? '0').toString()) ?? 0,
+    );
+  }
+
+  _LoginProfile copyWith({
+    String? cookie,
+    String? lastSubscribeUrl,
+    int? savedAtMs,
+    String? authData,
+  }) {
+    return _LoginProfile(
+      id: id,
+      baseUrl: baseUrl,
+      email: email,
+      authData: authData ?? this.authData,
+      cookie: cookie ?? this.cookie,
+      lastSubscribeUrl: lastSubscribeUrl ?? this.lastSubscribeUrl,
+      savedAtMs: savedAtMs ?? this.savedAtMs,
+    );
+  }
+}
