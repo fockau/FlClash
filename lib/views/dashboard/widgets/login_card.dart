@@ -6,7 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:fl_clash/common/common.dart';
 import 'package:fl_clash/controller.dart';
 import 'package:fl_clash/widgets/widgets.dart';
-import 'package:flutter/material.dart' hide Badge;
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -30,7 +30,7 @@ class XBoardLoginDashboardCard extends StatelessWidget {
   }
 }
 
-/// XBoard 登录卡片本体（不套 Card，外层已经是 CommonCard）
+/// XBoard 登录卡片本体
 class XBoardLoginCard extends StatefulWidget {
   const XBoardLoginCard({super.key});
 
@@ -39,20 +39,18 @@ class XBoardLoginCard extends StatefulWidget {
 }
 
 class _XBoardLoginCardState extends State<XBoardLoginCard> {
-  // 仅用于回填（输入在弹窗里）
   final _baseUrlCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
 
   bool _loading = false;
 
-  String? _authData; // 例如 "Bearer xxx"
-  String? _cookie; // *_session=...
+  String? _authData;
+  String? _cookie;
   String? _lastSubscribeUrl;
   int _lastFetchedAtMs = 0;
 
   List<_LoginProfile> _profiles = [];
 
-  // Dio：单例化
   late final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 12),
@@ -204,9 +202,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     await _saveProfiles(profiles);
 
     final cur = sp.getString(_kCurrentProfileId) ?? '';
-    if (cur == p.id) {
-      await sp.setString(_kCurrentProfileId, '');
-    }
+    if (cur == p.id) await sp.setString(_kCurrentProfileId, '');
     if (mounted) setState(() => _profiles = profiles);
   }
 
@@ -290,22 +286,14 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                     controller: emailCtrl,
                     keyboardType: TextInputType.emailAddress,
                     decoration: const InputDecoration(labelText: '邮箱'),
-                    validator: (v) {
-                      if ((v ?? '').trim().isEmpty) return '请输入邮箱';
-                      return null;
-                    },
+                    validator: (v) => (v ?? '').trim().isEmpty ? '请输入邮箱' : null,
                   ),
                   const SizedBox(height: 10),
                   TextFormField(
                     controller: pwdCtrl,
                     obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: '密码（不会保存）',
-                    ),
-                    validator: (v) {
-                      if ((v ?? '').isEmpty) return '请输入密码';
-                      return null;
-                    },
+                    decoration: const InputDecoration(labelText: '密码（不会保存）'),
+                    validator: (v) => (v ?? '').isEmpty ? '请输入密码' : null,
                     onFieldSubmitted: (_) => submit(),
                   ),
                   const SizedBox(height: 10),
@@ -412,8 +400,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       );
 
       _toast('登录成功（已写入历史）');
-
-      // 登录后自动刷新订阅（不导入）
       await _fetchSubscribe(showToast: true);
     } catch (e) {
       _toast('错误：$e');
@@ -504,7 +490,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     }
   }
 
-  // ---------- import into flclash ----------
+  // ✅ 导入订阅：复用 FlClash 官方入口
   Future<void> _updateAndImport() async {
     await _fetchSubscribe(showToast: false);
     final sub = _lastSubscribeUrl;
@@ -515,11 +501,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
 
     try {
       setState(() => _loading = true);
-
-      // ✅ 复用 FlClash 现有入口：等价于“从 URL 导入/更新”
       await appController.addProfileFormURL(sub.trim());
-
-      _toast('已导入订阅（如已存在请在 Profiles 里更新/应用）');
+      _toast('已导入订阅（如需强制刷新请到 Profiles 里手动更新）');
     } catch (e) {
       _toast('导入失败：$e');
     } finally {
@@ -554,12 +537,11 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   void _showHistorySheet() {
     showModalBottomSheet(
       context: context,
-      showDragHandle: true,
       isScrollControlled: true,
       builder: (_) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -608,7 +590,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                           if (p.email.isNotEmpty) p.email else '(未记录邮箱)',
                           p.baseUrl,
                         ].join('  ·  ');
-
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
                           title: Text(title),
@@ -652,6 +633,32 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     _toast('已复制订阅链接');
   }
 
+  Widget _historyIconWithCount() {
+    final count = _profiles.length;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        const Icon(Icons.history),
+        if (count > 0)
+          Positioned(
+            right: -6,
+            top: -6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.redAccent,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '$count',
+                style: const TextStyle(fontSize: 10, color: Colors.white),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
@@ -672,11 +679,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             IconButton(
               tooltip: '历史登录',
               onPressed: _loading ? null : _showHistorySheet,
-              icon: Badge(
-                isLabelVisible: _profiles.isNotEmpty,
-                label: Text('${_profiles.length}'),
-                child: const Icon(Icons.history),
-              ),
+              icon: _historyIconWithCount(),
             ),
           ],
         ),
@@ -765,7 +768,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   }
 }
 
-/// 登录弹窗数据（不存密码）
 class _LoginFormData {
   final String baseUrl;
   final String email;
@@ -780,7 +782,6 @@ class _LoginFormData {
   });
 }
 
-/// 历史登录数据模型（只存 token/cookie/订阅/备注，不存密码）
 class _LoginProfile {
   final String id;
   final String baseUrl;
