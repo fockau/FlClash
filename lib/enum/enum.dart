@@ -4,7 +4,9 @@ import 'dart:io';
 
 import 'package:fl_clash/common/color.dart';
 import 'package:fl_clash/common/system.dart';
+import 'package:fl_clash/views/dashboard/widgets/login_card.dart';
 import 'package:fl_clash/views/dashboard/widgets/widgets.dart';
+import 'package:fl_clash/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
@@ -240,7 +242,7 @@ enum ActionMethod {
   setupConfig,
   deleteFile,
 
-  /// Android
+  ///Android,
   setState,
   startTun,
   stopTun,
@@ -279,8 +281,9 @@ enum FunctionTag {
   saveSharedFile,
 }
 
-/// DashboardWidget：新增卡片必须在这里加枚举项
-/// 默认显示与否由 config.dart 的 defaultDashboardWidgets 控制
+/// DashboardWidget：
+/// - 这里定义“可选的 Dashboard 卡片”
+/// - 默认显示与否在 config.dart 的 defaultDashboardWidgets 控制
 enum DashboardWidget {
   networkSpeed(GridItem(crossAxisCellCount: 8, child: NetworkSpeed())),
   outboundModeV2(GridItem(crossAxisCellCount: 8, child: OutboundModeV2())),
@@ -302,11 +305,7 @@ enum DashboardWidget {
   intranetIp(GridItem(crossAxisCellCount: 4, child: IntranetIP())),
   memoryInfo(GridItem(crossAxisCellCount: 4, child: MemoryInfo())),
 
-  /// ✅ XBoard 登录卡片（默认不显示：别加进 config.dart 的 defaultDashboardWidgets）
-  ///
-  /// 重要：
-  /// - 不要用 LoginCard 这种通用名字，项目里很容易同名冲突导致编译失败
-  /// - 这里 child 必须是一个“无参数可直接构造”的 widget（方便 const/序列化/稳定）
+  /// ✅ XBoard 登录卡片（默认不显示：不要加进 defaultDashboardWidgets）
   xboardLoginCard(
     GridItem(crossAxisCellCount: 8, child: XBoardLoginDashboardCard()),
     platforms: SupportPlatform.values,
@@ -349,7 +348,7 @@ enum RuleAction {
   IP_ASN('IP-ASN'),
   GEOIP('GEOIP'),
   SRC_GEOIP('SRC-GEOIP'),
-  SRC_IP_ASN('SRC-IP_ASN'),
+  SRC_IP_ASN('SRC-IP-ASN'), // ✅ 修正：必须是 SRC-IP-ASN
   SRC_IP_CIDR('SRC-IP-CIDR'),
   SRC_IP_SUFFIX('SRC-IP-SUFFIX'),
   DST_PORT('DST-PORT'),
