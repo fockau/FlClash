@@ -3,60 +3,18 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:fl_clash/common/common.dart';
 import 'package:fl_clash/controller.dart';
-import 'package:fl_clash/models/models.dart';
-import 'package:fl_clash/providers/providers.dart';
 import 'package:fl_clash/state.dart';
 import 'package:fl_clash/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const String kXBoardSubLabel = 'XBoard订阅';
-
 /// Dashboard 外层卡片（enum.dart 直接引用这个）
-class XBoardLoginDashboardCard extends ConsumerWidget {
+class XBoardLoginDashboardCard extends StatelessWidget {
   const XBoardLoginDashboardCard({super.key});
 
-  /// ✅ 保留你要求的“profilesProvider + appController”写法
-  /// - 若订阅 URL 不存在：走 FlClash 内置入口 addProfileFormURL(url)
-  /// - 若存在：重命名 + updateProfile + 删除重复 + 若当前则 apply
-  Future<void> _importOrUpdateSubscription(WidgetRef ref, String subscribeUrl) async {
-    final url = subscribeUrl.trim();
-    if (url.isEmpty) return;
-
-    final profiles = ref.read(profilesProvider);
-    final sameUrl = profiles.where((p) => (p.url).trim() == url).toList();
-
-    if (sameUrl.isEmpty) {
-      // ✅ 这就是你贴的 AddProfileView 那个入口
-      await appController.addProfileFormURL(url);
-      return;
-    }
-
-    Profile target = sameUrl.first;
-
-    if ((target.label ?? '').trim() != kXBoardSubLabel) {
-      final fixed = target.copyWith(label: kXBoardSubLabel);
-      appController.setProfile(fixed);
-      target = fixed;
-    }
-
-    await appController.updateProfile(target);
-
-    // 删除重复
-    for (final dup in sameUrl.skip(1)) {
-      await appController.deleteProfile(dup.id);
-    }
-
-    // 如果是当前订阅，则更新后立即应用
-    if (ref.read(currentProfileIdProvider) == target.id) {
-      await appController.applyProfile(silence: true);
-    }
-  }
-
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return SizedBox(
       height: getWidgetHeight(2),
       child: CommonCard(
@@ -65,13 +23,11 @@ class XBoardLoginDashboardCard extends ConsumerWidget {
         child: Padding(
           padding: baseInfoEdgeInsets.copyWith(top: 0),
           child: XBoardLoginCard(
+            // ✅ 订阅拿到以后：直接走 FlClash 内置入口导入/更新
             onApplySubscription: (url) async {
-              await _importOrUpdateSubscription(ref, url);
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('已导入/更新订阅到 FlClash')),
-                );
-              }
+              final u = url.trim();
+              if (u.isEmpty) return;
+              await appController.addProfileFormURL(u);
             },
           ),
         ),
@@ -177,12 +133,10 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
 
   String _extractSessionCookieFromSetCookie(List<String> setCookies) {
     if (setCookies.isEmpty) return '';
-    // 优先 *_session
     for (final c in setCookies) {
       final m = RegExp(r'([A-Za-z0-9_]+_session=[^;]+)').firstMatch(c);
       if (m != null) return m.group(1) ?? '';
     }
-    // fallback：第一个 key=value
     final m2 = RegExp(r'^([^;]+)').firstMatch(setCookies.first);
     return m2?.group(1) ?? '';
   }
@@ -339,7 +293,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
               onPressed: _loading ? null : () => Navigator.of(context).pop(false),
               child: const Text('取消'),
             ),
-            FilledButton(
+            ElevatedButton(
               onPressed: _loading ? null : () => Navigator.of(context).pop(true),
               child: const Text('登录'),
             ),
@@ -425,7 +379,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       _pwdCtrl.text = '';
       _toast('登录成功（已写入历史）');
 
-      // 登录后自动刷新订阅
       await _fetchSubscribe(showToast: true);
     } catch (e) {
       _toast('错误：$e');
@@ -472,7 +425,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         return;
       }
 
-      // set-cookie 更新
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -496,7 +448,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         profileId: pid,
       );
 
-      // 同步到历史
       if (pid.isNotEmpty) {
         final profiles = await _loadProfiles();
         final idx = profiles.indexWhere((x) => x.id == pid);
@@ -531,7 +482,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     try {
       setState(() => _loading = true);
       await widget.onApplySubscription(sub);
-      _toast('已导入/更新订阅');
+      _toast('已导入/更新订阅到 FlClash');
     } catch (e) {
       _toast('导入订阅失败：$e');
     } finally {
@@ -573,12 +524,11 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   void _showHistorySheet() {
     showModalBottomSheet(
       context: context,
-      showDragHandle: true,
       isScrollControlled: true,
       builder: (_) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -623,7 +573,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                         final p = _profiles[i];
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
-                          title: Text('${p.email.isEmpty ? '(未记录邮箱)' : p.email}  ·  ${p.baseUrl}'),
+                          title: Text('${p.email.isEmpty ? '(未记录邮箱)' : p.email} · ${p.baseUrl}'),
                           subtitle: Text(
                             '保存：${_fmtTime(p.savedAtMs)}'
                             '${p.lastSubscribeUrl.isNotEmpty ? '\n订阅：${p.lastSubscribeUrl}' : ''}',
@@ -712,7 +662,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         Row(
           children: [
             Expanded(
-              child: FilledButton(
+              child: ElevatedButton(
                 onPressed: _loading
                     ? null
                     : () async {
@@ -724,7 +674,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             ),
             const SizedBox(width: 10),
             Expanded(
-              child: FilledButton.tonal(
+              child: OutlinedButton(
                 onPressed: _loading
                     ? null
                     : () async {
