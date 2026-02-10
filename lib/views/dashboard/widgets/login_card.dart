@@ -1,11 +1,45 @@
 import 'dart:convert';
 
+import 'package:fl_clash/common/common.dart';
+import 'package:fl_clash/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// 一个 Dashboard 卡片：
+/// ✅ FlClash Dashboard 使用的外层 Widget：
+/// - 统一高度、统一卡片样式
+/// - 默认不显示由 config.dart 的 defaultDashboardWidgets 控制
+class LoginCard extends StatelessWidget {
+  const LoginCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: getWidgetHeight(1),
+      child: CommonCard(
+        info: const Info(label: 'XBoard', iconData: Icons.login),
+        onPressed: () {},
+        child: Padding(
+          padding: baseInfoEdgeInsets.copyWith(top: 0),
+          child: XBoardLoginCard(
+            onApplySubscription: (url) async {
+              // TODO: 你在这里接 FlClash 的“导入/更新订阅”逻辑
+              // 例如：调用某个 Provider / Controller 去导入订阅 URL
+              //
+              // 现在先做一个提示，保证能跑通
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('已拿到订阅链接：$url')),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 一个 Dashboard 内容组件：
 /// - baseUrl + email + password 登录（只缓存 auth_data/cookie，不缓存密码）
 /// - 获取最新订阅链接
 /// - 历史登录记录（切换/删除）
@@ -315,7 +349,9 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       if (c != null && c.isNotEmpty) headers['Cookie'] = c;
 
       final uri = Uri.parse('$base/api/v1/user/getSubscribe');
-      final resp = await http.get(uri, headers: headers).timeout(const Duration(seconds: 15));
+      final resp = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 15));
 
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         _toast('获取订阅失败：HTTP ${resp.statusCode}');
@@ -440,7 +476,10 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                 Row(
                   children: [
                     const Expanded(
-                      child: Text('历史登录', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                      child: Text(
+                        '历史登录',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                      ),
                     ),
                     TextButton(
                       onPressed: _loading
@@ -513,127 +552,127 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final loggedIn = (_authData != null && _authData!.isNotEmpty);
     final hasSub = (_lastSubscribeUrl != null && _lastSubscribeUrl!.isNotEmpty);
 
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+    // ✅ 注意：这里不再套 Card()，因为外层已经是 CommonCard
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 顶部标题 + 历史按钮
+        Row(
           children: [
-            // 顶部标题 + 历史按钮
-            Row(
-              children: [
-                Expanded(
-                  child: Text(widget.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                ),
-                IconButton(
-                  tooltip: '历史登录',
-                  onPressed: _loading ? null : _showHistorySheet,
-                  icon: Badge(
-                    isLabelVisible: _profiles.isNotEmpty,
-                    label: Text('${_profiles.length}'),
-                    child: const Icon(Icons.history),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-
-            // baseUrl（为了多站点切换必须要有）
-            TextField(
-              controller: _baseUrlCtrl,
-              enabled: !_loading,
-              decoration: const InputDecoration(
-                labelText: '面板域名',
-                hintText: 'https://example.com',
+            Expanded(
+              child: Text(
+                widget.title,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
               ),
             ),
-            const SizedBox(height: 8),
-
-            // 邮箱 / 密码
-            TextField(
-              controller: _emailCtrl,
-              enabled: !_loading,
-              keyboardType: TextInputType.emailAddress,
-              decoration: const InputDecoration(labelText: '邮箱'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _pwdCtrl,
-              enabled: !_loading,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: '密码（不会保存）'),
-            ),
-            const SizedBox(height: 10),
-
-            // 登录 + 获取订阅并导入
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _loading ? null : _login,
-                    child: Text(_loading ? '处理中…' : '登录'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: FilledButton.tonal(
-                    onPressed: (!loggedIn || _loading) ? null : _applyToFlClash,
-                    child: Text(_loading ? '处理中…' : '更新订阅并导入'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-
-            // 状态 + 订阅展示
-            Row(
-              children: [
-                Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    loggedIn ? '已登录（auth_data 已缓存）' : '未登录',
-                    style: TextStyle(color: loggedIn ? Colors.green : Theme.of(context).hintColor),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '仅刷新订阅',
-                  onPressed: (!loggedIn || _loading) ? null : () => _fetchSubscribe(showToast: true),
-                  icon: const Icon(Icons.refresh),
-                ),
-              ],
-            ),
-
-            if (hasSub) ...[
-              const SizedBox(height: 6),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: SelectableText(
-                  _lastSubscribeUrl!,
-                  style: const TextStyle(fontSize: 12),
-                ),
+            IconButton(
+              tooltip: '历史登录',
+              onPressed: _loading ? null : _showHistorySheet,
+              icon: Badge(
+                isLabelVisible: _profiles.isNotEmpty,
+                label: Text('${_profiles.length}'),
+                child: const Icon(Icons.history),
               ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '最后刷新：${_fmtTime(_lastFetchedAtMs)}',
-                      style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: _loading ? null : _copySubscribe,
-                    icon: const Icon(Icons.copy, size: 16),
-                    label: const Text('复制'),
-                  ),
-                ],
-              ),
-            ],
+            ),
           ],
         ),
-      ),
+        const SizedBox(height: 8),
+
+        // baseUrl（为了多站点切换必须要有）
+        TextField(
+          controller: _baseUrlCtrl,
+          enabled: !_loading,
+          decoration: const InputDecoration(
+            labelText: '面板域名',
+            hintText: 'https://example.com',
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // 邮箱 / 密码
+        TextField(
+          controller: _emailCtrl,
+          enabled: !_loading,
+          keyboardType: TextInputType.emailAddress,
+          decoration: const InputDecoration(labelText: '邮箱'),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _pwdCtrl,
+          enabled: !_loading,
+          obscureText: true,
+          decoration: const InputDecoration(labelText: '密码（不会保存）'),
+        ),
+        const SizedBox(height: 10),
+
+        // 登录 + 获取订阅并导入
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton(
+                onPressed: _loading ? null : _login,
+                child: Text(_loading ? '处理中…' : '登录'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: FilledButton.tonal(
+                onPressed: (!loggedIn || _loading) ? null : _applyToFlClash,
+                child: Text(_loading ? '处理中…' : '更新订阅并导入'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+
+        // 状态 + 刷新订阅
+        Row(
+          children: [
+            Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                loggedIn ? '已登录（auth_data 已缓存）' : '未登录',
+                style: TextStyle(
+                  color: loggedIn ? Colors.green : Theme.of(context).hintColor,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: '仅刷新订阅',
+              onPressed: (!loggedIn || _loading) ? null : () => _fetchSubscribe(showToast: true),
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+
+        if (hasSub) ...[
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SelectableText(
+              _lastSubscribeUrl!,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '最后刷新：${_fmtTime(_lastFetchedAtMs)}',
+                  style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: _loading ? null : _copySubscribe,
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text('复制'),
+              ),
+            ],
+          ),
+        ],
+      ],
     );
   }
 }
