@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:fl_clash/common/common.dart';
@@ -10,22 +9,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// =======================
 /// 外层 Dashboard Widget（大卡）
+/// - 默认高度：getWidgetHeight(2)（最大卡片）
 /// =======================
 class LoginCard extends StatefulWidget {
   const LoginCard({
     super.key,
     required this.onApplySubscription,
     this.title = 'XBoard',
-    this.heightFactor = 2,
   });
 
-  /// ✅ 把订阅链接写入 FlClash，并触发“导入/更新订阅”的逻辑
+  /// ✅ 把订阅链接写入 FlClash 并触发“导入/更新订阅”
   final Future<void> Function(String subscribeUrl) onApplySubscription;
 
   final String title;
-
-  /// ✅ 默认大卡：2 表示 getWidgetHeight(2)
-  final int heightFactor;
 
   @override
   State<LoginCard> createState() => _LoginCardState();
@@ -56,7 +52,7 @@ class _LoginCardState extends State<LoginCard> {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: getWidgetHeight(widget.heightFactor),
+      height: getWidgetHeight(2), // ✅ 最大卡片：三个输入框+按钮+历史
       child: CommonCard(
         info: Info(label: widget.title, iconData: Icons.login),
         onPressed: () {},
@@ -64,9 +60,7 @@ class _LoginCardState extends State<LoginCard> {
           padding: baseInfoEdgeInsets.copyWith(top: 0),
           child: AnimatedBuilder(
             animation: _c,
-            builder: (context, _) {
-              return _LoginCardBody(controller: _c);
-            },
+            builder: (_, __) => _LoginCardBody(c: _c),
           ),
         ),
       ),
@@ -78,53 +72,57 @@ class _LoginCardState extends State<LoginCard> {
 /// UI（只负责展示，不负责业务）
 /// =======================
 class _LoginCardBody extends StatelessWidget {
-  const _LoginCardBody({required this.controller});
-
-  final XBoardController controller;
+  const _LoginCardBody({required this.c});
+  final XBoardController c;
 
   @override
   Widget build(BuildContext context) {
-    final st = controller.state;
+    final st = c.state;
     final theme = Theme.of(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // 顶部栏：标题 + 状态 + 历史按钮
+        // 顶部：标题 + 状态 + 历史按钮
         Row(
           children: [
-            Expanded(
+            const Expanded(
               child: Text(
                 '面板登录与订阅更新',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
               ),
             ),
             Text(
               st.statusLabel,
               style: TextStyle(
                 fontSize: 12,
-                color: st.isLoggedIn
-                    ? Colors.green
-                    : theme.hintColor,
+                color: st.isLoggedIn ? Colors.green : theme.hintColor,
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 8),
             IconButton(
               tooltip: '历史登录',
-              onPressed: st.busy ? null : () => _showHistorySheet(context, controller),
-              icon: Badge(
-                isLabelVisible: st.profiles.isNotEmpty,
-                label: Text('${st.profiles.length}'),
-                child: const Icon(Icons.history),
+              onPressed: st.busy ? null : () => _showHistory(context),
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(Icons.history),
+                  if (st.profiles.isNotEmpty)
+                    Positioned(
+                      right: -6,
+                      top: -6,
+                      child: _CountDot(text: '${st.profiles.length}'),
+                    ),
+                ],
               ),
             ),
           ],
         ),
         const SizedBox(height: 12),
 
-        // 三个输入框（核心）
+        // ✅ 三个输入框（最大卡重点）
         TextField(
-          controller: controller.baseUrlCtrl,
+          controller: c.baseUrlCtrl,
           enabled: !st.busy,
           decoration: const InputDecoration(
             labelText: 'API / 面板域名',
@@ -133,14 +131,14 @@ class _LoginCardBody extends StatelessWidget {
         ),
         const SizedBox(height: 10),
         TextField(
-          controller: controller.emailCtrl,
+          controller: c.emailCtrl,
           enabled: !st.busy,
           keyboardType: TextInputType.emailAddress,
           decoration: const InputDecoration(labelText: '邮箱'),
         ),
         const SizedBox(height: 10),
         TextField(
-          controller: controller.passwordCtrl,
+          controller: c.passwordCtrl,
           enabled: !st.busy,
           obscureText: true,
           decoration: const InputDecoration(
@@ -150,27 +148,21 @@ class _LoginCardBody extends StatelessWidget {
         ),
         const SizedBox(height: 14),
 
-        // 两个主按钮：登录 / 更新订阅（写入 FlClash）
+        // ✅ 两个主按钮：登录 / 更新订阅（拉取并写入 FlClash）
         Row(
           children: [
             Expanded(
-              child: FilledButton(
-                onPressed: st.busy ? null : () => controller.login(context),
-                child: _BtnChild(
-                  loading: st.phase == XBoardPhase.loggingIn,
-                  text: '登录',
-                ),
+              child: ElevatedButton(
+                onPressed: st.busy ? null : () => c.login(context),
+                child: _BtnChild(loading: st.phase == XBoardPhase.loggingIn, text: '登录'),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: FilledButton.tonal(
-                onPressed: (!st.isLoggedIn || st.busy)
-                    ? null
-                    : () => controller.updateAndApply(context),
+              child: OutlinedButton(
+                onPressed: (!st.isLoggedIn || st.busy) ? null : () => c.updateAndApply(context),
                 child: _BtnChild(
-                  loading: st.phase == XBoardPhase.applying ||
-                      st.phase == XBoardPhase.fetchingSub,
+                  loading: st.phase == XBoardPhase.fetchingSub || st.phase == XBoardPhase.applying,
                   text: '更新订阅',
                 ),
               ),
@@ -180,7 +172,7 @@ class _LoginCardBody extends StatelessWidget {
 
         const SizedBox(height: 10),
 
-        // 次级操作：仅拉取订阅（不写入）
+        // 错误提示 + “仅获取订阅”
         Row(
           children: [
             Expanded(
@@ -192,11 +184,9 @@ class _LoginCardBody extends StatelessWidget {
               ),
             ),
             TextButton.icon(
-              onPressed: (!st.isLoggedIn || st.busy)
-                  ? null
-                  : () => controller.fetchSubscribeOnly(context),
+              onPressed: (!st.isLoggedIn || st.busy) ? null : () => c.fetchSubscribeOnly(context),
               icon: const Icon(Icons.refresh, size: 16),
-              label: const Text('仅获取订阅'),
+              label: const Text('仅获取'),
             ),
           ],
         ),
@@ -204,14 +194,14 @@ class _LoginCardBody extends StatelessWidget {
         const SizedBox(height: 10),
 
         // 订阅展示区
-        if (st.subscribeUrl.isNotEmpty) ...[
+        if (st.subscribeUrl.isNotEmpty)
           _SubscribeBox(
             url: st.subscribeUrl,
             lastFetchedAtMs: st.lastFetchedAtMs,
             busy: st.busy,
-            onCopy: () => controller.copySubscribe(context),
-          ),
-        ] else
+            onCopy: () => c.copySubscribe(context),
+          )
+        else
           _HintBox(
             text: st.isLoggedIn
                 ? '已登录，点击「更新订阅」即可获取并写入 FlClash'
@@ -221,11 +211,11 @@ class _LoginCardBody extends StatelessWidget {
     );
   }
 
-  void _showHistorySheet(BuildContext context, XBoardController c) {
+  void _showHistory(BuildContext context) {
     showModalBottomSheet(
       context: context,
-      showDragHandle: true,
       isScrollControlled: true,
+      showDragHandle: true,
       builder: (_) {
         final st = c.state;
         return SafeArea(
@@ -283,11 +273,7 @@ class _LoginCardBody extends StatelessWidget {
                                 },
                           trailing: IconButton(
                             tooltip: '删除',
-                            onPressed: st.busy
-                                ? null
-                                : () async {
-                                    await c.deleteProfile(context, p.id);
-                                  },
+                            onPressed: st.busy ? null : () => c.deleteProfile(context, p.id),
                             icon: const Icon(Icons.delete_outline),
                           ),
                         );
@@ -303,9 +289,28 @@ class _LoginCardBody extends StatelessWidget {
   }
 }
 
+class _CountDot extends StatelessWidget {
+  const _CountDot({required this.text});
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.redAccent,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 10, color: Colors.white, height: 1.0),
+      ),
+    );
+  }
+}
+
 class _BtnChild extends StatelessWidget {
   const _BtnChild({required this.loading, required this.text});
-
   final bool loading;
   final String text;
 
@@ -315,11 +320,7 @@ class _BtnChild extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: const [
-        SizedBox(
-          width: 16,
-          height: 16,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
+        SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
         SizedBox(width: 8),
         Text('处理中…'),
       ],
@@ -333,17 +334,14 @@ class _HintBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final bg = Theme.of(context).cardColor.withOpacity(0.6);
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
+        color: bg,
         borderRadius: BorderRadius.circular(12),
-        color: cs.surfaceContainerHighest.withOpacity(0.35),
       ),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
-      ),
+      child: Text(text, style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
     );
   }
 }
@@ -363,13 +361,10 @@ class _SubscribeBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final bg = Theme.of(context).cardColor.withOpacity(0.6);
     return Container(
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        color: cs.surfaceContainerHighest.withOpacity(0.35),
-      ),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -399,14 +394,9 @@ class _SubscribeBox extends StatelessWidget {
 }
 
 /// =======================
-/// Controller（业务逻辑核心）
+/// Controller（业务逻辑）
 /// =======================
-enum XBoardPhase {
-  idle,
-  loggingIn,
-  fetchingSub,
-  applying,
-}
+enum XBoardPhase { idle, loggingIn, fetchingSub, applying }
 
 class XBoardState {
   XBoardState({
@@ -425,15 +415,11 @@ class XBoardState {
   final XBoardPhase phase;
   final String baseUrl;
   final String email;
-
   final String authData;
   final String cookie;
-
   final String subscribeUrl;
   final int lastFetchedAtMs;
-
   final String? lastError;
-
   final List<XBoardProfile> profiles;
   final String currentProfileId;
 
@@ -441,11 +427,30 @@ class XBoardState {
   bool get isLoggedIn => authData.isNotEmpty;
 
   String get statusLabel {
-    if (phase == XBoardPhase.loggingIn) return '登录中';
-    if (phase == XBoardPhase.fetchingSub) return '拉取订阅中';
-    if (phase == XBoardPhase.applying) return '写入中';
-    return isLoggedIn ? '已登录' : '未登录';
+    switch (phase) {
+      case XBoardPhase.loggingIn:
+        return '登录中';
+      case XBoardPhase.fetchingSub:
+        return '获取订阅中';
+      case XBoardPhase.applying:
+        return '写入中';
+      case XBoardPhase.idle:
+        return isLoggedIn ? '已登录' : '未登录';
+    }
   }
+
+  static XBoardState initial() => XBoardState(
+        phase: XBoardPhase.idle,
+        baseUrl: '',
+        email: '',
+        authData: '',
+        cookie: '',
+        subscribeUrl: '',
+        lastFetchedAtMs: 0,
+        lastError: null,
+        profiles: const [],
+        currentProfileId: '',
+      );
 
   XBoardState copyWith({
     XBoardPhase? phase,
@@ -455,7 +460,7 @@ class XBoardState {
     String? cookie,
     String? subscribeUrl,
     int? lastFetchedAtMs,
-    String? lastError, // 传 null 表示清空
+    String? lastError,
     List<XBoardProfile>? profiles,
     String? currentProfileId,
   }) {
@@ -471,21 +476,7 @@ class XBoardState {
       profiles: profiles ?? this.profiles,
       currentProfileId: currentProfileId ?? this.currentProfileId,
     );
-    // 注意：lastError 这里用显式传入（否则你可能希望清空错误）
   }
-
-  static XBoardState initial() => XBoardState(
-        phase: XBoardPhase.idle,
-        baseUrl: '',
-        email: '',
-        authData: '',
-        cookie: '',
-        subscribeUrl: '',
-        lastFetchedAtMs: 0,
-        lastError: null,
-        profiles: const [],
-        currentProfileId: '',
-      );
 }
 
 class XBoardController extends ChangeNotifier {
@@ -512,15 +503,11 @@ class XBoardController extends ChangeNotifier {
     if (_inited) return;
     _inited = true;
 
-    final local = await store.loadCurrent();
+    final cur = await store.loadCurrent();
     final profiles = await store.loadProfiles();
 
-    final base = local.baseUrl.isNotEmpty
-        ? local.baseUrl
-        : (profiles.isNotEmpty ? profiles.first.baseUrl : '');
-    final email = local.email.isNotEmpty
-        ? local.email
-        : (profiles.isNotEmpty ? profiles.first.email : '');
+    final base = cur.baseUrl.isNotEmpty ? cur.baseUrl : (profiles.isNotEmpty ? profiles.first.baseUrl : '');
+    final email = cur.email.isNotEmpty ? cur.email : (profiles.isNotEmpty ? profiles.first.email : '');
 
     baseUrlCtrl.text = base;
     emailCtrl.text = email;
@@ -528,12 +515,12 @@ class XBoardController extends ChangeNotifier {
     _state = _state.copyWith(
       baseUrl: base,
       email: email,
-      authData: local.authData,
-      cookie: local.cookie,
-      subscribeUrl: local.lastSubscribeUrl,
-      lastFetchedAtMs: local.lastFetchedAtMs,
+      authData: cur.authData,
+      cookie: cur.cookie,
+      subscribeUrl: cur.lastSubscribeUrl,
+      lastFetchedAtMs: cur.lastFetchedAtMs,
       profiles: profiles,
-      currentProfileId: local.profileId,
+      currentProfileId: cur.profileId,
       lastError: null,
     );
     notifyListeners();
@@ -545,12 +532,7 @@ class XBoardController extends ChangeNotifier {
     return s;
   }
 
-  String _makeProfileId(String baseUrl, String email) {
-    final s = '${baseUrl.toLowerCase()}|${email.toLowerCase()}';
-    return s.codeUnits.fold<int>(0, (a, b) => (a * 131 + b) & 0x7fffffff).toString();
-  }
-
-  bool _validateInputs(BuildContext context, {required bool needPassword}) {
+  bool _validate(BuildContext context, {required bool needPassword}) {
     final base = _normBaseUrl(baseUrlCtrl.text);
     final email = emailCtrl.text.trim();
     final pwd = passwordCtrl.text;
@@ -584,9 +566,14 @@ class XBoardController extends ChangeNotifier {
     notifyListeners();
   }
 
+  String _makeProfileId(String baseUrl, String email) {
+    final s = '${baseUrl.toLowerCase()}|${email.toLowerCase()}';
+    return s.codeUnits.fold<int>(0, (a, b) => (a * 131 + b) & 0x7fffffff).toString();
+  }
+
   Future<void> login(BuildContext context) async {
     if (state.busy) return;
-    if (!_validateInputs(context, needPassword: true)) return;
+    if (!_validate(context, needPassword: true)) return;
 
     final base = _normBaseUrl(baseUrlCtrl.text);
     final email = emailCtrl.text.trim();
@@ -596,7 +583,6 @@ class XBoardController extends ChangeNotifier {
 
     try {
       final resp = await api.login(baseUrl: base, email: email, password: pwd);
-
       if (resp.authData.isEmpty) {
         _setError('登录成功但未找到 data.auth_data（返回结构不一致）');
         return;
@@ -604,7 +590,6 @@ class XBoardController extends ChangeNotifier {
 
       final pid = _makeProfileId(base, email);
 
-      // 更新 state
       _state = _state.copyWith(
         phase: XBoardPhase.idle,
         baseUrl: base,
@@ -616,7 +601,6 @@ class XBoardController extends ChangeNotifier {
       );
       notifyListeners();
 
-      // 保存 current + 历史（不保存密码）
       await store.saveCurrent(
         XBoardCurrent(
           baseUrl: base,
@@ -639,12 +623,11 @@ class XBoardController extends ChangeNotifier {
         savedAtMs: DateTime.now().millisecondsSinceEpoch,
       );
       final profiles = await store.upsertProfile(profile);
+
       _state = _state.copyWith(profiles: profiles, lastError: null);
       notifyListeners();
 
       _toast(context, '登录成功');
-      // ✅ 不自动拉订阅：减少无意义请求，更“合理与稳定”
-      // 需要就点“更新订阅”
     } catch (e) {
       _setError('登录失败：$e');
     }
@@ -666,12 +649,7 @@ class XBoardController extends ChangeNotifier {
     _setPhase(XBoardPhase.fetchingSub);
 
     try {
-      final resp = await api.getSubscribe(
-        baseUrl: base,
-        authData: state.authData,
-        cookie: state.cookie,
-      );
-
+      final resp = await api.getSubscribe(baseUrl: base, authData: state.authData, cookie: state.cookie);
       if (resp.subscribeUrl.isEmpty) {
         _setError('获取成功，但没有 data.subscribe_url');
         return;
@@ -701,7 +679,6 @@ class XBoardController extends ChangeNotifier {
         ),
       );
 
-      // 同步到历史（若能匹配到当前 profile）
       if (state.currentProfileId.isNotEmpty) {
         final profiles = await store.updateProfileSubscribe(
           id: state.currentProfileId,
@@ -713,13 +690,12 @@ class XBoardController extends ChangeNotifier {
         notifyListeners();
       }
 
-      _toast(context, '已获取最新订阅链接（未写入 FlClash）');
+      _toast(context, '已获取最新订阅（未写入 FlClash）');
     } catch (e) {
       _setError('获取订阅失败：$e');
     }
   }
 
-  /// ✅ 你要的按钮：更新订阅并写入 FlClash
   Future<void> updateAndApply(BuildContext context) async {
     if (state.busy) return;
     if (!state.isLoggedIn) {
@@ -727,11 +703,9 @@ class XBoardController extends ChangeNotifier {
       return;
     }
 
-    // 先拉订阅
     await fetchSubscribeOnly(context);
     if (state.subscribeUrl.isEmpty) return;
 
-    // 写入 FlClash
     _setPhase(XBoardPhase.applying);
     try {
       await onApplySubscription(state.subscribeUrl);
@@ -751,15 +725,14 @@ class XBoardController extends ChangeNotifier {
     passwordCtrl.text = '';
 
     _state = _state.copyWith(
+      phase: XBoardPhase.idle,
       baseUrl: p.baseUrl,
       email: p.email,
       authData: p.authData,
       cookie: p.cookie,
       subscribeUrl: p.lastSubscribeUrl,
-      lastFetchedAtMs: 0,
       currentProfileId: p.id,
       lastError: null,
-      phase: XBoardPhase.idle,
     );
     notifyListeners();
 
@@ -775,7 +748,7 @@ class XBoardController extends ChangeNotifier {
       ),
     );
 
-    _toast(context, '已切换账号（可点击“更新订阅”刷新）');
+    _toast(context, '已切换账号');
   }
 
   Future<void> deleteProfile(BuildContext context, String id) async {
@@ -797,6 +770,14 @@ class XBoardController extends ChangeNotifier {
     await Clipboard.setData(ClipboardData(text: state.subscribeUrl));
     _toast(context, '已复制订阅链接');
   }
+
+  @override
+  void dispose() {
+    baseUrlCtrl.dispose();
+    emailCtrl.dispose();
+    passwordCtrl.dispose();
+    super.dispose();
+  }
 }
 
 /// =======================
@@ -804,7 +785,6 @@ class XBoardController extends ChangeNotifier {
 /// =======================
 class XBoardApi {
   XBoardApi({required this.client});
-
   final http.Client client;
 
   Future<_LoginResp> login({
@@ -882,7 +862,6 @@ class XBoardApi {
 
   static String _extractSessionCookie(String? setCookie) {
     if (setCookie == null || setCookie.isEmpty) return '';
-    // 你的原逻辑：server_name_session=...
     final m = RegExp(r'(server_name_session=[^;]+)').firstMatch(setCookie);
     return m?.group(1) ?? '';
   }
@@ -1017,7 +996,6 @@ class XBoardStore {
   }
 }
 
-/// 当前选中的登录态（不含密码）
 class XBoardCurrent {
   XBoardCurrent({
     required this.baseUrl,
@@ -1038,7 +1016,6 @@ class XBoardCurrent {
   final String profileId;
 }
 
-/// 历史记录条目
 class XBoardProfile {
   XBoardProfile({
     required this.id,
@@ -1050,7 +1027,7 @@ class XBoardProfile {
     required this.savedAtMs,
   });
 
-  final String id; // baseUrl|email hash
+  final String id;
   final String baseUrl;
   final String email;
   final String authData;
@@ -1105,7 +1082,6 @@ class XBoardProfile {
   }
 }
 
-/// 格式化工具
 class XBoardFmt {
   static String time(int ms) {
     if (ms <= 0) return '-';
