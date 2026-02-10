@@ -1,20 +1,26 @@
+// ignore_for_file: use_build_context_synchronously
+
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:fl_clash/common/common.dart';
-import 'package:fl_clash/controller.dart';
+import 'package:fl_clash/models/models.dart';
+import 'package:fl_clash/providers/providers.dart';
 import 'package:fl_clash/state.dart';
 import 'package:fl_clash/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Dashboard 外层卡片（enum.dart 直接引用这个）
-class XBoardLoginDashboardCard extends StatelessWidget {
+/// Dashboard 外层卡片（用于 enum.dart 的 DashboardWidget）
+/// - 卡片只展示按钮：登录 / 更新订阅并导入
+/// - 右上角：历史记录（保留不变）
+class XBoardLoginDashboardCard extends ConsumerWidget {
   const XBoardLoginDashboardCard({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return SizedBox(
       height: getWidgetHeight(2),
       child: CommonCard(
@@ -22,44 +28,40 @@ class XBoardLoginDashboardCard extends StatelessWidget {
         onPressed: () {},
         child: Padding(
           padding: baseInfoEdgeInsets.copyWith(top: 0),
-          child: XBoardLoginCard(
-            // ✅ 订阅拿到以后：直接走 FlClash 内置入口导入/更新
-            onApplySubscription: (url) async {
-              final u = url.trim();
-              if (u.isEmpty) return;
-              await appController.addProfileFormURL(u);
-            },
-          ),
+          child: XBoardLoginCard(title: 'XBoard'),
         ),
       ),
     );
   }
 }
 
-/// 卡片本体：只显示按钮 + 状态 + 历史入口（输入走弹窗）
-class XBoardLoginCard extends StatefulWidget {
+/// XBoard 登录卡片本体（不套 Card，外层已经是 CommonCard）
+/// - 弹窗输入：API域名/邮箱/密码/订阅备注（=订阅名）
+/// - 更新订阅并导入：
+///   1) getSubscribe 拿到最新 subscribe_url
+///   2) 按「订阅名」(label) 去重：存在则更新并删重复，不存在则创建并更新
+class XBoardLoginCard extends ConsumerStatefulWidget {
   const XBoardLoginCard({
     super.key,
-    required this.onApplySubscription,
-    this.title = 'XBoard 登录',
+    required this.title,
   });
 
-  final Future<void> Function(String subscribeUrl) onApplySubscription;
   final String title;
 
   @override
-  State<XBoardLoginCard> createState() => _XBoardLoginCardState();
+  ConsumerState<XBoardLoginCard> createState() => _XBoardLoginCardState();
 }
 
-class _XBoardLoginCardState extends State<XBoardLoginCard> {
+class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   final _baseUrlCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _pwdCtrl = TextEditingController();
+  final _remarkCtrl = TextEditingController();
 
   bool _loading = false;
 
-  String? _authData; // "Bearer xxx"
-  String? _cookie; // "*_session=..."
+  String? _authData; // e.g. "Bearer xxx"
+  String? _cookie; // *_session=...
   String? _lastSubscribeUrl;
   int _lastFetchedAtMs = 0;
 
@@ -79,18 +81,17 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     ),
   );
 
-  @override
-  void initState() {
-    super.initState();
-    _loadLocal();
+  // ---------- i18n ----------
+  bool get _isZh {
+    final code = Localizations.localeOf(context).languageCode.toLowerCase();
+    return code.startsWith('zh');
   }
 
-  @override
-  void dispose() {
-    _baseUrlCtrl.dispose();
-    _emailCtrl.dispose();
-    _pwdCtrl.dispose();
-    super.dispose();
+  String _t(String zh, String en) => _isZh ? zh : en;
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   // ---------- util ----------
@@ -100,19 +101,15 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return s;
   }
 
-  bool _validateBaseUrl(String base) =>
-      base.startsWith('http://') || base.startsWith('https://');
+  bool _validateBaseUrl(String base) {
+    return base.startsWith('http://') || base.startsWith('https://');
+  }
 
   String _fmtTime(int ms) {
     if (ms <= 0) return '-';
     final dt = DateTime.fromMillisecondsSinceEpoch(ms);
     String two(int v) => v.toString().padLeft(2, '0');
     return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
-  }
-
-  void _toast(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   String _extractAuthData(dynamic loginJson) {
@@ -131,6 +128,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return '';
   }
 
+  /// 从 set-cookie 里提取 session cookie（尽量泛化，不绑死 server_name）
   String _extractSessionCookieFromSetCookie(List<String> setCookies) {
     if (setCookies.isEmpty) return '';
     for (final c in setCookies) {
@@ -146,12 +144,25 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return s.codeUnits.fold<int>(0, (a, b) => (a * 131 + b) & 0x7fffffff).toString();
   }
 
+  /// 订阅名（label）生成策略（确保永远不为空）
+  /// - 有备注：用备注（你要的“按订阅名去重”核心）
+  /// - 没备注：fallback 用 email
+  /// - 都没有：fallback 用 XBoard
+  String _buildSubscriptionLabel() {
+    final r = _remarkCtrl.text.trim();
+    if (r.isNotEmpty) return r;
+    final e = _emailCtrl.text.trim();
+    if (e.isNotEmpty) return 'XBoard-$e';
+    return 'XBoard';
+  }
+
   // ---------- storage ----------
   static const _kCurrentBaseUrl = 'xboard_current_baseUrl';
   static const _kCurrentAuthData = 'xboard_current_authData';
   static const _kCurrentCookie = 'xboard_current_cookie';
   static const _kCurrentLastSubscribeUrl = 'xboard_current_lastSubscribeUrl';
   static const _kCurrentProfileId = 'xboard_current_profile_id';
+  static const _kCurrentRemark = 'xboard_current_remark';
   static const _kProfiles = 'xboard_profiles_json';
 
   Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
@@ -162,6 +173,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     required String cookie,
     required String lastSubscribeUrl,
     required String profileId,
+    required String remark,
   }) async {
     final sp = await _sp();
     await sp.setString(_kCurrentBaseUrl, baseUrl);
@@ -169,6 +181,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     await sp.setString(_kCurrentCookie, cookie);
     await sp.setString(_kCurrentLastSubscribeUrl, lastSubscribeUrl);
     await sp.setString(_kCurrentProfileId, profileId);
+    await sp.setString(_kCurrentRemark, remark);
   }
 
   Future<List<_LoginProfile>> _loadProfiles() async {
@@ -192,10 +205,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
 
   Future<void> _saveProfiles(List<_LoginProfile> profiles) async {
     final sp = await _sp();
-    await sp.setString(
-      _kProfiles,
-      jsonEncode(profiles.map((e) => e.toJson()).toList()),
-    );
+    final list = profiles.map((e) => e.toJson()).toList();
+    await sp.setString(_kProfiles, jsonEncode(list));
   }
 
   Future<void> _upsertProfile(_LoginProfile p) async {
@@ -218,7 +229,9 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     await _saveProfiles(profiles);
 
     final cur = sp.getString(_kCurrentProfileId) ?? '';
-    if (cur == p.id) await sp.setString(_kCurrentProfileId, '');
+    if (cur == p.id) {
+      await sp.setString(_kCurrentProfileId, '');
+    }
     if (mounted) setState(() => _profiles = profiles);
   }
 
@@ -229,10 +242,16 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final c = sp.getString(_kCurrentCookie) ?? '';
     final sub = sp.getString(_kCurrentLastSubscribeUrl) ?? '';
     final pid = sp.getString(_kCurrentProfileId) ?? '';
+    final remark = sp.getString(_kCurrentRemark) ?? '';
 
     final profiles = await _loadProfiles();
     final fallbackBase = profiles.isNotEmpty ? profiles.first.baseUrl : '';
+    final fallbackEmail = profiles.isNotEmpty ? profiles.first.email : '';
+    final fallbackRemark = profiles.isNotEmpty ? profiles.first.remark : '';
+
     _baseUrlCtrl.text = (base.isNotEmpty ? base : fallbackBase);
+    _emailCtrl.text = fallbackEmail;
+    _remarkCtrl.text = (remark.isNotEmpty ? remark : fallbackRemark);
 
     if (!mounted) return;
     setState(() {
@@ -247,68 +266,88 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     }
   }
 
+  @override
+  void initState() {
+    super.initState();
+    _loadLocal();
+  }
+
+  @override
+  void dispose() {
+    _baseUrlCtrl.dispose();
+    _emailCtrl.dispose();
+    _pwdCtrl.dispose();
+    _remarkCtrl.dispose();
+    super.dispose();
+  }
+
   // ---------- dialogs ----------
   Future<void> _showLoginDialog() async {
-    final baseCtrl = TextEditingController(text: _baseUrlCtrl.text.trim());
-    final emailCtrl = TextEditingController(text: _emailCtrl.text.trim());
-    final pwdCtrl = TextEditingController();
+    // 预填：baseUrl / email / remark；密码永远不保存
+    _pwdCtrl.text = '';
 
     final ok = await showDialog<bool>(
       context: context,
       barrierDismissible: !_loading,
-      builder: (_) {
+      builder: (ctx) {
         return AlertDialog(
-          title: const Text('XBoard 登录'),
+          title: Text(_t('XBoard 登录', 'XBoard Login')),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 TextField(
-                  controller: baseCtrl,
+                  controller: _baseUrlCtrl,
                   enabled: !_loading,
-                  decoration: const InputDecoration(
-                    labelText: 'API / 面板域名',
+                  keyboardType: TextInputType.url,
+                  decoration: InputDecoration(
+                    labelText: _t('API / 面板域名', 'API / Panel URL'),
                     hintText: 'https://example.com',
                   ),
                 ),
                 const SizedBox(height: 10),
                 TextField(
-                  controller: emailCtrl,
+                  controller: _emailCtrl,
                   enabled: !_loading,
                   keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(labelText: '邮箱'),
+                  decoration: InputDecoration(labelText: _t('邮箱', 'Email')),
                 ),
                 const SizedBox(height: 10),
                 TextField(
-                  controller: pwdCtrl,
+                  controller: _pwdCtrl,
                   enabled: !_loading,
                   obscureText: true,
-                  decoration: const InputDecoration(labelText: '密码（不会保存）'),
+                  decoration: InputDecoration(labelText: _t('密码（不会保存）', 'Password (not saved)')),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _remarkCtrl,
+                  enabled: !_loading,
+                  decoration: InputDecoration(
+                    labelText: _t('订阅备注（订阅名，用于去重）', 'Subscription name (dedup key)'),
+                    hintText: _t('例如：King', 'e.g. King'),
+                  ),
                 ),
               ],
             ),
           ),
           actions: [
             TextButton(
-              onPressed: _loading ? null : () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
+              onPressed: _loading ? null : () => Navigator.of(ctx).pop(false),
+              child: Text(_t('取消', 'Cancel')),
             ),
-            ElevatedButton(
-              onPressed: _loading ? null : () => Navigator.of(context).pop(true),
-              child: const Text('登录'),
+            FilledButton(
+              onPressed: _loading ? null : () => Navigator.of(ctx).pop(true),
+              child: Text(_t('登录', 'Login')),
             ),
           ],
         );
       },
     );
 
-    if (ok != true) return;
-
-    _baseUrlCtrl.text = baseCtrl.text;
-    _emailCtrl.text = emailCtrl.text;
-    _pwdCtrl.text = pwdCtrl.text;
-
-    await _login();
+    if (ok == true) {
+      await _login();
+    }
   }
 
   // ---------- network ----------
@@ -318,29 +357,31 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final pwd = _pwdCtrl.text;
 
     if (!_validateBaseUrl(base)) {
-      _toast('面板域名必须以 http:// 或 https:// 开头');
+      _toast(_t('面板域名必须以 http:// 或 https:// 开头', 'Panel URL must start with http:// or https://'));
       return;
     }
     if (email.isEmpty || pwd.isEmpty) {
-      _toast('请输入邮箱和密码');
+      _toast(_t('请输入邮箱和密码', 'Please enter email and password'));
       return;
     }
 
     setState(() => _loading = true);
     try {
+      final url = '$base/api/v1/passport/auth/login';
       final resp = await _dio.post(
-        '$base/api/v1/passport/auth/login',
+        url,
         data: jsonEncode({'email': email, 'password': pwd}),
       );
 
       if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
-        _toast('登录失败：HTTP ${resp.statusCode ?? 'unknown'}');
+        _toast(_t('登录失败：HTTP ', 'Login failed: HTTP ') + '${resp.statusCode ?? 'unknown'}');
         return;
       }
 
-      final a = _extractAuthData(resp.data);
+      final j = resp.data;
+      final a = _extractAuthData(j);
       if (a.isEmpty) {
-        _toast('登录成功但未找到 data.auth_data（返回结构不一致）');
+        _toast(_t('登录成功但未找到 data.auth_data（返回结构不一致）', 'Login ok but data.auth_data not found'));
         return;
       }
 
@@ -350,6 +391,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       final cookie = _extractSessionCookieFromSetCookie(setCookies);
 
       final pid = _makeProfileId(base, email);
+      final remark = _remarkCtrl.text.trim();
 
       setState(() {
         _authData = a;
@@ -362,6 +404,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         cookie: cookie,
         lastSubscribeUrl: _lastSubscribeUrl ?? '',
         profileId: pid,
+        remark: remark,
       );
 
       await _upsertProfile(
@@ -369,6 +412,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
           id: pid,
           baseUrl: base,
           email: email,
+          remark: remark,
           authData: a,
           cookie: cookie,
           lastSubscribeUrl: _lastSubscribeUrl ?? '',
@@ -376,12 +420,12 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         ),
       );
 
-      _pwdCtrl.text = '';
-      _toast('登录成功（已写入历史）');
+      _toast(_t('登录成功（已写入历史）', 'Login success (saved to history)'));
 
+      // 登录后自动刷新订阅（不导入）
       await _fetchSubscribe(showToast: true);
     } catch (e) {
-      _toast('错误：$e');
+      _toast(_t('错误：', 'Error: ') + '$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -392,11 +436,11 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final a = _authData;
 
     if (a == null || a.isEmpty) {
-      _toast('未登录：请先登录');
+      _toast(_t('未登录：请先登录', 'Not logged in'));
       return;
     }
     if (!_validateBaseUrl(base)) {
-      _toast('面板域名必须以 http:// 或 https:// 开头');
+      _toast(_t('面板域名必须以 http:// 或 https:// 开头', 'Panel URL must start with http:// or https://'));
       return;
     }
 
@@ -409,19 +453,18 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       final c = _cookie;
       if (c != null && c.isNotEmpty) headers['Cookie'] = c;
 
-      final resp = await _dio.get(
-        '$base/api/v1/user/getSubscribe',
-        options: Options(headers: headers),
-      );
+      final url = '$base/api/v1/user/getSubscribe';
+      final resp = await _dio.get(url, options: Options(headers: headers));
 
       if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
-        _toast('获取订阅失败：HTTP ${resp.statusCode ?? 'unknown'}');
+        _toast(_t('获取订阅失败：HTTP ', 'Fetch subscribe failed: HTTP ') + '${resp.statusCode ?? 'unknown'}');
         return;
       }
 
-      final sub = _extractSubscribeUrl(resp.data);
+      final j = resp.data;
+      final sub = _extractSubscribeUrl(j);
       if (sub.isEmpty) {
-        _toast('获取成功，但没有 data.subscribe_url');
+        _toast(_t('获取成功，但没有 data.subscribe_url', 'Fetch ok but data.subscribe_url missing'));
         return;
       }
 
@@ -446,8 +489,10 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         cookie: finalCookie,
         lastSubscribeUrl: sub,
         profileId: pid,
+        remark: _remarkCtrl.text.trim(),
       );
 
+      // 同步到历史
       if (pid.isNotEmpty) {
         final profiles = await _loadProfiles();
         final idx = profiles.indexWhere((x) => x.id == pid);
@@ -457,34 +502,118 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             lastSubscribeUrl: sub,
             savedAtMs: DateTime.now().millisecondsSinceEpoch,
             authData: a,
+            remark: _remarkCtrl.text.trim(),
           );
           await _saveProfiles(profiles);
           if (mounted) setState(() => _profiles = profiles);
         }
       }
 
-      if (showToast) _toast('已获取最新订阅链接');
+      if (showToast) _toast(_t('已获取最新订阅链接', 'Got latest subscription URL'));
     } catch (e) {
-      _toast('错误：$e');
+      _toast(_t('错误：', 'Error: ') + '$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _applyToFlClash() async {
-    await _fetchSubscribe(showToast: false);
-    final sub = _lastSubscribeUrl;
-    if (sub == null || sub.isEmpty) {
-      _toast('暂无订阅链接');
+  /// 版本 B：严格按订阅名（label）去重
+  /// - 需要 label（我们保证永不为空：备注 > email > XBoard）
+  /// - 同名存在：更新 URL + updateProfile + 删除同名重复项
+  /// - 同名不存在：创建 + updateProfile
+  Future<void> _importOrUpdateSubscriptionIntoFlClash({
+    required String subscribeUrl,
+    required String label,
+  }) async {
+    final scaffold = globalState.homeScaffoldKey.currentState;
+
+    final run = (Future<void> Function() job) async {
+      if (scaffold?.mounted == true) {
+        await scaffold!.loadingRun(job);
+      } else {
+        await job();
+      }
+    };
+
+    await run(() async {
+      final url = subscribeUrl.trim();
+      final wantLabel = label.trim();
+      if (url.isEmpty) return;
+
+      // 版本B：严格按名称；但我们上层保证 wantLabel 永不为空
+      final profiles = ref.read(profilesProvider);
+      final sameLabel = profiles.where((p) => ((p.label ?? '').trim() == wantLabel)).toList();
+
+      Profile target;
+
+      if (sameLabel.isNotEmpty) {
+        target = sameLabel.first;
+
+        var fixed = target;
+        if (fixed.url.trim() != url) {
+          fixed = fixed.copyWith(url: url);
+          globalState.appController.setProfile(fixed);
+        }
+
+        // 更新订阅内容
+        await globalState.appController.updateProfile(fixed);
+
+        // 删除同名重复项
+        for (final dup in sameLabel.skip(1)) {
+          await globalState.appController.deleteProfile(dup.id);
+        }
+
+        // 若它是当前订阅，则更新后立即应用
+        if (ref.read(currentProfileIdProvider) == fixed.id) {
+          await globalState.appController.applyProfile(silence: true);
+        }
+
+        globalState.showMessage(
+          title: _t('完成', 'Done'),
+          message: TextSpan(text: _t('订阅已更新：', 'Subscription updated: ') + (fixed.label ?? wantLabel)),
+        );
+        return;
+      }
+
+      // 没有同名：新建 + 更新
+      final created = Profile.normal(label: wantLabel, url: url);
+      await globalState.appController.addProfile(created);
+      await globalState.appController.updateProfile(created);
+
+      if (ref.read(currentProfileIdProvider) == created.id) {
+        await globalState.appController.applyProfile(silence: true);
+      }
+
+      globalState.showMessage(
+        title: _t('完成', 'Done'),
+        message: TextSpan(text: _t('订阅已导入并更新：', 'Subscription imported & updated: ') + (created.label ?? wantLabel)),
+      );
+    });
+  }
+
+  Future<void> _updateAndImport() async {
+    final loggedIn = (_authData != null && _authData!.isNotEmpty);
+    if (!loggedIn) {
+      _toast(_t('未登录：请先登录', 'Not logged in'));
       return;
     }
 
+    // 1) 获取最新 subscribe_url
+    await _fetchSubscribe(showToast: false);
+
+    final sub = _lastSubscribeUrl;
+    if (sub == null || sub.isEmpty) {
+      _toast(_t('暂无订阅链接', 'No subscription URL'));
+      return;
+    }
+
+    // 2) 导入/更新到 FlClash（版本B：按订阅名去重）
+    final label = _buildSubscriptionLabel();
     try {
       setState(() => _loading = true);
-      await widget.onApplySubscription(sub);
-      _toast('已导入/更新订阅到 FlClash');
+      await _importOrUpdateSubscriptionIntoFlClash(subscribeUrl: sub, label: label);
     } catch (e) {
-      _toast('导入订阅失败：$e');
+      _toast(_t('导入失败：', 'Import failed: ') + '$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -494,12 +623,13 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final s = _lastSubscribeUrl;
     if (s == null || s.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: s));
-    _toast('已复制订阅链接');
+    _toast(_t('已复制订阅链接', 'Subscription URL copied'));
   }
 
   Future<void> _useProfile(_LoginProfile p) async {
     _baseUrlCtrl.text = p.baseUrl;
     _emailCtrl.text = p.email;
+    _remarkCtrl.text = p.remark;
     _pwdCtrl.text = '';
 
     if (!mounted) return;
@@ -515,29 +645,62 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       cookie: p.cookie,
       lastSubscribeUrl: p.lastSubscribeUrl,
       profileId: p.id,
+      remark: p.remark,
     );
 
-    _toast('已切换账号，正在刷新订阅…');
+    _toast(_t('已切换账号，正在刷新订阅…', 'Switched account, refreshing…'));
     await _fetchSubscribe(showToast: false);
+  }
+
+  // ---------- history UI ----------
+  Widget _historyIconWithBadge({required int count}) {
+    // 不用 Badge 组件，最大化兼容性
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        const Icon(Icons.history),
+        if (count > 0)
+          Positioned(
+            right: -6,
+            top: -6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primary,
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                '$count',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: Theme.of(context).colorScheme.onPrimary,
+                  height: 1,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 
   void _showHistorySheet() {
     showModalBottomSheet(
       context: context,
+      showDragHandle: true,
       isScrollControlled: true,
       builder: (_) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        '历史登录',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                        _t('历史登录', 'Login History'),
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                       ),
                     ),
                     TextButton(
@@ -551,17 +714,17 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                                 setState(() => _profiles = []);
                                 Navigator.pop(context);
                               }
-                              _toast('已清空历史记录');
+                              _toast(_t('已清空历史记录', 'History cleared'));
                             },
-                      child: const Text('清空'),
+                      child: Text(_t('清空', 'Clear')),
                     ),
                   ],
                 ),
                 const SizedBox(height: 8),
                 if (_profiles.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: Text('暂无历史记录（登录一次就会自动保存）'),
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Text(_t('暂无历史记录（登录一次就会自动保存）', 'No history (saved after login)')),
                   )
                 else
                   Flexible(
@@ -571,14 +734,18 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                       separatorBuilder: (_, __) => const Divider(height: 1),
                       itemBuilder: (_, i) {
                         final p = _profiles[i];
+                        final remark = p.remark.trim();
+                        final title = (remark.isNotEmpty)
+                            ? '$remark  ·  ${p.email.isEmpty ? '-' : p.email}'
+                            : '${p.email.isEmpty ? '-' : p.email}';
+
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
-                          title: Text('${p.email.isEmpty ? '(未记录邮箱)' : p.email} · ${p.baseUrl}'),
+                          title: Text(title),
                           subtitle: Text(
-                            '保存：${_fmtTime(p.savedAtMs)}'
-                            '${p.lastSubscribeUrl.isNotEmpty ? '\n订阅：${p.lastSubscribeUrl}' : ''}',
+                            '${p.baseUrl}\n${_t('保存：', 'Saved: ')}${_fmtTime(p.savedAtMs)}',
                           ),
-                          isThreeLine: p.lastSubscribeUrl.isNotEmpty,
+                          isThreeLine: true,
                           onTap: _loading
                               ? null
                               : () async {
@@ -586,7 +753,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                                   await _useProfile(p);
                                 },
                           trailing: IconButton(
-                            tooltip: '删除',
+                            tooltip: _t('删除', 'Delete'),
                             onPressed: _loading
                                 ? null
                                 : () async {
@@ -607,37 +774,12 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     );
   }
 
-  Widget _historyIcon() {
-    final n = _profiles.length;
-    if (n <= 0) return const Icon(Icons.history);
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        const Icon(Icons.history),
-        Positioned(
-          right: -6,
-          top: -6,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-            decoration: BoxDecoration(
-              color: Colors.redAccent,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              '$n',
-              style: const TextStyle(color: Colors.white, fontSize: 10, height: 1.2),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
     final loggedIn = (_authData != null && _authData!.isNotEmpty);
     final hasSub = (_lastSubscribeUrl != null && _lastSubscribeUrl!.isNotEmpty);
+    final label = _buildSubscriptionLabel();
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -651,65 +793,64 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
               ),
             ),
             IconButton(
-              tooltip: '历史登录',
+              tooltip: _t('历史登录', 'History'),
               onPressed: _loading ? null : _showHistorySheet,
-              icon: _historyIcon(),
+              icon: _historyIconWithBadge(count: _profiles.length),
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
 
+        // 卡片主体只放按钮：登录 / 更新订阅并导入
         Row(
           children: [
             Expanded(
-              child: ElevatedButton(
-                onPressed: _loading
-                    ? null
-                    : () async {
-                        HapticFeedback.selectionClick();
-                        await _showLoginDialog();
-                      },
-                child: Text(_loading ? '处理中…' : '登录'),
+              child: FilledButton(
+                onPressed: _loading ? null : _showLoginDialog,
+                child: Text(_loading ? _t('处理中…', 'Working…') : _t('登录', 'Login')),
               ),
             ),
             const SizedBox(width: 10),
             Expanded(
-              child: OutlinedButton(
-                onPressed: _loading
-                    ? null
-                    : () async {
-                        HapticFeedback.selectionClick();
-                        if (!loggedIn) {
-                          await _showLoginDialog();
-                          return;
-                        }
-                        await _applyToFlClash();
-                      },
-                child: Text(_loading ? '处理中…' : '更新订阅并写入'),
+              child: FilledButton.tonal(
+                onPressed: (!loggedIn || _loading) ? null : _updateAndImport,
+                child: Text(_loading ? _t('处理中…', 'Working…') : _t('更新订阅并导入', 'Update & Import')),
               ),
             ),
           ],
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Row(
           children: [
             Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                loggedIn ? '已登录（auth_data 已缓存）' : '未登录（点击登录按钮输入信息）',
-                style: TextStyle(
-                  color: loggedIn ? Colors.green : Theme.of(context).hintColor,
-                ),
+                loggedIn
+                    ? _t('已登录（auth_data 已缓存）', 'Logged in (auth cached)')
+                    : _t('未登录', 'Not logged in'),
+                style: TextStyle(color: loggedIn ? Colors.green : Theme.of(context).hintColor),
               ),
             ),
             IconButton(
-              tooltip: '仅刷新订阅',
+              tooltip: _t('仅刷新订阅', 'Refresh only'),
               onPressed: (!loggedIn || _loading) ? null : () => _fetchSubscribe(showToast: true),
               icon: const Icon(Icons.refresh),
             ),
           ],
+        ),
+
+        // 显示将会用于去重的订阅名（避免用户不清楚为什么会合并/删除）
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              _t('订阅名：', 'Name: ') + label,
+              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+            ),
+          ),
         ),
 
         if (hasSub) ...[
@@ -726,14 +867,14 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             children: [
               Expanded(
                 child: Text(
-                  '最后刷新：${_fmtTime(_lastFetchedAtMs)}',
+                  _t('最后刷新：', 'Last refresh: ') + _fmtTime(_lastFetchedAtMs),
                   style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
                 ),
               ),
               TextButton.icon(
                 onPressed: _loading ? null : _copySubscribe,
                 icon: const Icon(Icons.copy, size: 16),
-                label: const Text('复制'),
+                label: Text(_t('复制', 'Copy')),
               ),
             ],
           ),
@@ -748,6 +889,7 @@ class _LoginProfile {
   final String id;
   final String baseUrl;
   final String email;
+  final String remark; // 订阅备注（用于生成 label/去重）
   final String authData;
   final String cookie;
   final String lastSubscribeUrl;
@@ -757,6 +899,7 @@ class _LoginProfile {
     required this.id,
     required this.baseUrl,
     required this.email,
+    required this.remark,
     required this.authData,
     required this.cookie,
     required this.lastSubscribeUrl,
@@ -767,6 +910,7 @@ class _LoginProfile {
         'id': id,
         'baseUrl': baseUrl,
         'email': email,
+        'remark': remark,
         'authData': authData,
         'cookie': cookie,
         'lastSubscribeUrl': lastSubscribeUrl,
@@ -778,12 +922,15 @@ class _LoginProfile {
     final id = (j['id'] ?? '').toString();
     final baseUrl = (j['baseUrl'] ?? '').toString();
     final email = (j['email'] ?? '').toString();
+    final remark = (j['remark'] ?? '').toString();
     final authData = (j['authData'] ?? '').toString();
     if (id.isEmpty || baseUrl.isEmpty || authData.isEmpty) return null;
+
     return _LoginProfile(
       id: id,
       baseUrl: baseUrl,
       email: email,
+      remark: remark,
       authData: authData,
       cookie: (j['cookie'] ?? '').toString(),
       lastSubscribeUrl: (j['lastSubscribeUrl'] ?? '').toString(),
@@ -796,11 +943,13 @@ class _LoginProfile {
     String? lastSubscribeUrl,
     int? savedAtMs,
     String? authData,
+    String? remark,
   }) {
     return _LoginProfile(
       id: id,
       baseUrl: baseUrl,
       email: email,
+      remark: remark ?? this.remark,
       authData: authData ?? this.authData,
       cookie: cookie ?? this.cookie,
       lastSubscribeUrl: lastSubscribeUrl ?? this.lastSubscribeUrl,
