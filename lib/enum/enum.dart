@@ -303,7 +303,13 @@ enum DashboardWidget {
     platforms: desktopPlatforms,
   ),
   intranetIp(GridItem(crossAxisCellCount: 4, child: IntranetIP())),
-  memoryInfo(GridItem(crossAxisCellCount: 4, child: MemoryInfo()));
+  memoryInfo(GridItem(crossAxisCellCount: 4, child: MemoryInfo())),
+  loginCard(
+    GridItem(crossAxisCellCount: 4, child: LoginCard()),
+    // 如果你只想安卓显示，就改成 platforms: [SupportPlatform.Android],
+    // 如果你只想桌面显示，就 platforms: desktopPlatforms,
+    platforms: SupportPlatform.values,
+  );
 
   final GridItem widget;
   final List<SupportPlatform> platforms;
