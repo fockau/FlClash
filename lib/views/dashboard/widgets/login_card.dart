@@ -13,9 +13,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Dashboard 外层卡片（用于 enum.dart 的 DashboardWidget）
 ///
-/// 你要的是：
 /// - 卡片里只显示两个按钮：登录 / 更新订阅并导入
-/// - API域名/邮箱/密码 用弹窗输入
+/// - API域名/邮箱/密码/订阅备注 用弹窗输入
 /// - 右上角历史记录入口保留
 class XBoardLoginDashboardCard extends ConsumerWidget {
   const XBoardLoginDashboardCard({super.key});
@@ -31,7 +30,6 @@ class XBoardLoginDashboardCard extends ConsumerWidget {
           padding: baseInfoEdgeInsets.copyWith(top: 0),
           child: XBoardLoginCard(
             onAfterImport: (profile) async {
-              // 可选：导入完成后提示
               // ignore: use_build_context_synchronously
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('已导入并更新：${profile.label ?? "XBoard"}')),
@@ -71,7 +69,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   /// 当前激活账号缓存
   String _baseUrl = '';
   String _email = '';
-  String? _authData; // e.g. "Bearer xxx" or token string from data.auth_data
+  String? _authData; // e.g. token string from data.auth_data
   String? _cookie; // *_session=...
   String? _subscribeUrl;
   int _lastFetchedAtMs = 0;
@@ -113,11 +111,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     super.initState();
     _loadLocal();
   }
-
-  // ---------- i18n (中英自动切换) ----------
-  bool get _isZh => Localizations.localeOf(context).languageCode.toLowerCase().startsWith('zh');
-
-  String _t(String zh, String en) => _isZh ? zh : en;
 
   // ---------- util ----------
   void _toast(String msg) {
@@ -276,90 +269,83 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     final res = await showDialog<_LoginDialogResult>(
       context: context,
       barrierDismissible: !_loading,
-      builder: (_) {
-        return StatefulBuilder(
-          builder: (ctx, setSt) {
-            return CommonDialog(
-              title: _t('XBoard 登录', 'XBoard Login'),
-              actions: [
-                TextButton(
-                  onPressed: _loading ? null : () => Navigator.of(ctx).pop(),
-                  child: Text(_t('取消', 'Cancel')),
-                ),
-                TextButton(
-                  onPressed: _loading
-                      ? null
-                      : () {
-                          final base = _normBaseUrl(baseCtrl.text);
-                          final email = emailCtrl.text.trim();
-                          final pwd = pwdCtrl.text;
-                          final label = labelCtrl.text.trim();
-                          Navigator.of(ctx).pop(
-                            _LoginDialogResult(
-                              baseUrl: base,
-                              email: email,
-                              password: pwd,
-                              label: label.isEmpty ? widget.defaultLabel : label,
-                            ),
-                          );
-                        },
-                  child: Text(_t('登录', 'Login')),
-                ),
-              ],
-              child: SizedBox(
-                width: 360,
-                child: SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: baseCtrl,
-                        enabled: !_loading,
-                        decoration: InputDecoration(
-                          labelText: _t('API / 面板域名', 'API / Panel URL'),
-                          hintText: 'https://example.com',
+      builder: (ctx) {
+        return CommonDialog(
+          title: 'XBoard 登录',
+          actions: [
+            TextButton(
+              onPressed: _loading ? null : () => Navigator.of(ctx).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: _loading
+                  ? null
+                  : () {
+                      final base = _normBaseUrl(baseCtrl.text);
+                      final email = emailCtrl.text.trim();
+                      final pwd = pwdCtrl.text;
+                      final label = labelCtrl.text.trim();
+                      Navigator.of(ctx).pop(
+                        _LoginDialogResult(
+                          baseUrl: base,
+                          email: email,
+                          password: pwd,
+                          label: label.isEmpty ? widget.defaultLabel : label,
                         ),
-                        keyboardType: TextInputType.url,
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: emailCtrl,
-                        enabled: !_loading,
-                        decoration: InputDecoration(labelText: _t('邮箱', 'Email')),
-                        keyboardType: TextInputType.emailAddress,
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: pwdCtrl,
-                        enabled: !_loading,
-                        decoration: InputDecoration(labelText: _t('密码（不会保存）', 'Password (not saved)')),
-                        obscureText: true,
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: labelCtrl,
-                        enabled: !_loading,
-                        decoration: InputDecoration(
-                          labelText: _t('订阅备注（用于去重）', 'Subscription label (dedup key)'),
-                          hintText: _t('例如：King', 'e.g. King'),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          _t(
-                            '提示：导入时按“订阅备注”去重；同名只保留一条并更新。',
-                            'Tip: Import dedups by label; keeps one profile per same label and updates it.',
-                          ),
-                          style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
-                        ),
-                      ),
-                    ],
+                      );
+                    },
+              child: const Text('登录'),
+            ),
+          ],
+          child: SizedBox(
+            width: 360,
+            child: SingleChildScrollView(
+              child: Column(
+                children: [
+                  TextField(
+                    controller: baseCtrl,
+                    enabled: !_loading,
+                    decoration: const InputDecoration(
+                      labelText: 'API / 面板域名',
+                      hintText: 'https://example.com',
+                    ),
+                    keyboardType: TextInputType.url,
                   ),
-                ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: emailCtrl,
+                    enabled: !_loading,
+                    decoration: const InputDecoration(labelText: '邮箱'),
+                    keyboardType: TextInputType.emailAddress,
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: pwdCtrl,
+                    enabled: !_loading,
+                    decoration: const InputDecoration(labelText: '密码（不会保存）'),
+                    obscureText: true,
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: labelCtrl,
+                    enabled: !_loading,
+                    decoration: const InputDecoration(
+                      labelText: '订阅备注（用于去重）',
+                      hintText: '例如：King',
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '提示：导入时按“订阅备注”去重；同名只保留一条并更新。',
+                      style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+                    ),
+                  ),
+                ],
               ),
-            );
-          },
+            ),
+          ),
         );
       },
     );
@@ -367,22 +353,26 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     if (res == null) return;
 
     if (!_validateBaseUrl(res.baseUrl)) {
-      _toast(_t('面板域名必须以 http:// 或 https:// 开头', 'URL must start with http:// or https://'));
+      _toast('面板域名必须以 http:// 或 https:// 开头');
       return;
     }
     if (res.email.isEmpty || res.password.isEmpty) {
-      _toast(_t('请输入邮箱和密码', 'Please enter email and password'));
+      _toast('请输入邮箱和密码');
       return;
     }
 
-    // 写入当前输入（不代表已登录成功）
     setState(() {
       _baseUrl = res.baseUrl;
       _email = res.email;
       _subLabel = res.label;
     });
 
-    await _login(baseUrl: res.baseUrl, email: res.email, password: res.password, label: res.label);
+    await _login(
+      baseUrl: res.baseUrl,
+      email: res.email,
+      password: res.password,
+      label: res.label,
+    );
   }
 
   // ---------- network ----------
@@ -401,17 +391,16 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       );
 
       if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
-        _toast('${_t("登录失败", "Login failed")}: HTTP ${resp.statusCode ?? "unknown"}');
+        _toast('登录失败：HTTP ${resp.statusCode ?? "unknown"}');
         return;
       }
 
       final a = _extractAuthData(resp.data);
       if (a.isEmpty) {
-        _toast(_t('登录成功但未找到 data.auth_data（返回结构不一致）', 'Login ok but data.auth_data not found'));
+        _toast('登录成功但未找到 data.auth_data（返回结构不一致）');
         return;
       }
 
-      // cookie
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -447,12 +436,11 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         ),
       );
 
-      _toast(_t('登录成功（已写入历史）', 'Login success (saved to history)'));
+      _toast('登录成功（已写入历史）');
 
-      // 登录后刷新订阅
       await _fetchSubscribe(showToast: true);
     } catch (e) {
-      _toast('${_t("错误", "Error")}: $e');
+      _toast('错误：$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -463,11 +451,11 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     final a = _authData;
 
     if (a == null || a.isEmpty) {
-      _toast(_t('未登录：请先登录', 'Not logged in: please login first'));
+      _toast('未登录：请先登录');
       return;
     }
     if (!_validateBaseUrl(base)) {
-      _toast(_t('面板域名必须以 http:// 或 https:// 开头', 'URL must start with http:// or https://'));
+      _toast('面板域名必须以 http:// 或 https:// 开头');
       return;
     }
 
@@ -484,17 +472,16 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       final resp = await _dio.get(url, options: Options(headers: headers));
 
       if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
-        _toast('${_t("获取订阅失败", "Fetch subscribe failed")}: HTTP ${resp.statusCode ?? "unknown"}');
+        _toast('获取订阅失败：HTTP ${resp.statusCode ?? "unknown"}');
         return;
       }
 
       final sub = _extractSubscribeUrl(resp.data);
       if (sub.isEmpty) {
-        _toast(_t('获取成功，但没有 data.subscribe_url', 'Fetch ok but data.subscribe_url missing'));
+        _toast('获取成功，但没有 data.subscribe_url');
         return;
       }
 
-      // set-cookie 更新
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -520,7 +507,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         profileId: pid,
       );
 
-      // 同步到历史
       if (pid.isNotEmpty) {
         final profiles = await _loadProfiles();
         final idx = profiles.indexWhere((x) => x.id == pid);
@@ -539,9 +525,9 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         }
       }
 
-      if (showToast) _toast(_t('已获取最新订阅链接', 'Latest subscribe URL fetched'));
+      if (showToast) _toast('已获取最新订阅链接');
     } catch (e) {
-      _toast('${_t("错误", "Error")}: $e');
+      _toast('错误：$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -551,27 +537,25 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   /// - 已存在同名：更新第一条，其余删除
   /// - 不存在：创建并更新
   Future<void> _importByLabelDedupAndUpdate() async {
-    // 先确保订阅是最新
     await _fetchSubscribe(showToast: false);
 
     final label = (_subLabel.trim().isNotEmpty ? _subLabel.trim() : widget.defaultLabel);
     final url = (_subscribeUrl ?? '').trim();
 
     if (url.isEmpty) {
-      _toast(_t('暂无订阅链接：请先登录并获取订阅', 'No subscribe URL: login & fetch first'));
+      _toast('暂无订阅链接：请先登录并获取订阅');
       return;
     }
 
-    // 读取当前 profiles
     final profiles = ref.read(profilesProvider);
     final sameLabel = profiles.where((p) => (p.label ?? '').trim() == label).toList();
 
     Profile target;
 
     if (sameLabel.isNotEmpty) {
-      // 1) 用第一条作为目标：必要时把 url 更新为最新
       target = sameLabel.first;
 
+      // url/label 不一致则先修正
       if ((target.url).trim() != url) {
         final fixed = target.copyWith(url: url, label: label);
         globalState.appController.setProfile(fixed);
@@ -582,25 +566,19 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         target = fixed;
       }
 
-      // 2) 更新（拉取订阅/刷新内容）
+      // 更新订阅
       await globalState.appController.updateProfile(target);
 
-      // 3) 删除其它同名重复项
+      // 删除重复项
       for (final dup in sameLabel.skip(1)) {
         await globalState.appController.deleteProfile(dup.id);
       }
     } else {
-      // 不存在：创建 + 更新
+      // 新建并更新
       final created = Profile.normal(label: label, url: url);
       await globalState.appController.addProfile(created);
       await globalState.appController.updateProfile(created);
       target = created;
-    }
-
-    // 如果它是当前订阅，则更新后立即应用（可选，和你之前 fragment 一致）
-    final curId = ref.read(currentProfileIdProvider);
-    if (curId == target.id) {
-      await globalState.appController.applyProfile(silence: true);
     }
 
     // 回调
@@ -610,10 +588,8 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     }
 
     globalState.showMessage(
-      title: _t('完成', 'Done'),
-      message: TextSpan(
-        text: _t('订阅已导入并更新：', 'Imported & updated: ') + (target.label ?? label),
-      ),
+      title: '完成',
+      message: TextSpan(text: '订阅已导入并更新：${target.label ?? label}'),
     );
   }
 
@@ -621,7 +597,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     final s = (_subscribeUrl ?? '').trim();
     if (s.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: s));
-    _toast(_t('已复制订阅链接', 'Subscribe URL copied'));
+    _toast('已复制订阅链接');
   }
 
   // ---------- history ----------
@@ -645,7 +621,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       profileId: p.id,
     );
 
-    _toast(_t('已切换账号，正在刷新订阅…', 'Switched account, refreshing...'));
+    _toast('已切换账号，正在刷新订阅…');
     await _fetchSubscribe(showToast: false);
   }
 
@@ -664,10 +640,10 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
               children: [
                 Row(
                   children: [
-                    Expanded(
+                    const Expanded(
                       child: Text(
-                        _t('历史登录', 'History'),
-                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                        '历史登录',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                       ),
                     ),
                     TextButton(
@@ -682,17 +658,17 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                                 // ignore: use_build_context_synchronously
                                 Navigator.pop(context);
                               }
-                              _toast(_t('已清空历史记录', 'History cleared'));
+                              _toast('已清空历史记录');
                             },
-                      child: Text(_t('清空', 'Clear')),
+                      child: const Text('清空'),
                     ),
                   ],
                 ),
                 const SizedBox(height: 8),
                 if (list.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Text(_t('暂无历史记录（登录一次就会自动保存）', 'No history yet (saved after login)')),
+                  const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Text('暂无历史记录（登录一次就会自动保存）'),
                   )
                 else
                   Flexible(
@@ -704,10 +680,8 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                         final p = list[i];
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
-                          title: Text('${p.label.isNotEmpty ? p.label : "(no label)"} · ${p.email}'),
-                          subtitle: Text(
-                            '${p.baseUrl}\n${_t("保存", "Saved")}: ${_fmtTime(p.savedAtMs)}',
-                          ),
+                          title: Text('${p.label.isNotEmpty ? p.label : "(无备注)"} · ${p.email}'),
+                          subtitle: Text('${p.baseUrl}\n保存：${_fmtTime(p.savedAtMs)}'),
                           isThreeLine: true,
                           onTap: _loading
                               ? null
@@ -717,7 +691,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                                   await _useHistory(p);
                                 },
                           trailing: IconButton(
-                            tooltip: _t('删除', 'Delete'),
+                            tooltip: '删除',
                             onPressed: _loading
                                 ? null
                                 : () async {
@@ -748,7 +722,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // header
         Row(
           children: [
             Expanded(
@@ -757,9 +730,8 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
               ),
             ),
-            // history button with count dot
             IconButton(
-              tooltip: _t('历史登录', 'History'),
+              tooltip: '历史登录',
               onPressed: _loading ? null : _showHistorySheet,
               icon: Stack(
                 clipBehavior: Clip.none,
@@ -788,16 +760,13 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         ),
         const SizedBox(height: 10),
 
-        // status line
         Row(
           children: [
             Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                loggedIn
-                    ? _t('已登录（auth_data 已缓存）', 'Logged in (auth cached)')
-                    : _t('未登录', 'Not logged in'),
+                loggedIn ? '已登录（auth_data 已缓存）' : '未登录',
                 style: TextStyle(
                   color: loggedIn ? Colors.green : Theme.of(context).hintColor,
                 ),
@@ -807,39 +776,36 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
               TextButton.icon(
                 onPressed: _loading ? null : _copySubscribe,
                 icon: const Icon(Icons.copy, size: 16),
-                label: Text(_t('复制订阅', 'Copy')),
+                label: const Text('复制订阅'),
               ),
           ],
         ),
 
         const SizedBox(height: 8),
 
-        // label + last time
         Align(
           alignment: Alignment.centerLeft,
           child: Text(
-            '${_t("订阅备注", "Label")}: $label'
-            '${_lastFetchedAtMs > 0 ? '   ·   ${_t("刷新", "Fetched")}: ${_fmtTime(_lastFetchedAtMs)}' : ''}',
+            '订阅备注：$label${_lastFetchedAtMs > 0 ? '   ·   刷新：${_fmtTime(_lastFetchedAtMs)}' : ''}',
             style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
           ),
         ),
 
         const SizedBox(height: 12),
 
-        // buttons
         Row(
           children: [
             Expanded(
               child: FilledButton(
                 onPressed: _loading ? null : _showLoginDialog,
-                child: Text(_loading ? _t('处理中…', 'Working...') : _t('登录', 'Login')),
+                child: Text(_loading ? '处理中…' : '登录'),
               ),
             ),
             const SizedBox(width: 10),
             Expanded(
               child: FilledButton.tonal(
                 onPressed: (!loggedIn || _loading) ? null : _importByLabelDedupAndUpdate,
-                child: Text(_loading ? _t('处理中…', 'Working...') : _t('更新订阅并导入', 'Update & Import')),
+                child: Text(_loading ? '处理中…' : '更新订阅并导入'),
               ),
             ),
           ],
@@ -874,7 +840,6 @@ class _LoginDialogResult {
   });
 }
 
-/// 历史登录数据模型（只存 token/cookie/订阅，不存密码）
 class _LoginProfile {
   final String id;
   final String baseUrl;
