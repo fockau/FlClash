@@ -8,7 +8,7 @@ import 'package:fl_clash/state.dart';
 import 'package:fl_clash/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart'; // ✅ 必须有
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Dashboard 外层卡片（用于 enum.dart 的 DashboardWidget）
@@ -20,7 +20,6 @@ class XBoardLoginDashboardCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      // 现在卡片内容变少了，用 1 就够；你想更“显眼”可以改成 2
       height: getWidgetHeight(1),
       child: CommonCard(
         info: const Info(label: 'XBoard', iconData: Icons.login),
@@ -45,7 +44,6 @@ class XBoardLoginCard extends ConsumerStatefulWidget {
 }
 
 class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
-  // 这些 controller 仍然保留（用于弹窗输入 + 历史切换时回填）
   final _baseUrlCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _pwdCtrl = TextEditingController();
@@ -59,7 +57,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
 
   List<_LoginProfile> _profiles = [];
 
-  // Dio：单例化，避免频繁创建（更稳更省）
   late final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 12),
@@ -123,15 +120,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return '';
   }
 
-  /// 从 set-cookie 里提取 session cookie（尽量泛化，不绑死 server_name）
   String _extractSessionCookieFromSetCookie(List<String> setCookies) {
     if (setCookies.isEmpty) return '';
-    // 优先找 *_session
     for (final c in setCookies) {
       final m = RegExp(r'([A-Za-z0-9_]+_session=[^;]+)').firstMatch(c);
       if (m != null) return m.group(1) ?? '';
     }
-    // fallback：取第一段 key=value
     final m2 = RegExp(r'^([^;]+)').firstMatch(setCookies.first);
     return m2?.group(1) ?? '';
   }
@@ -231,9 +225,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     await _saveProfiles(profiles);
 
     final cur = sp.getString(_kCurrentProfileId) ?? '';
-    if (cur == p.id) {
-      await sp.setString(_kCurrentProfileId, '');
-    }
+    if (cur == p.id) await sp.setString(_kCurrentProfileId, '');
     if (mounted) setState(() => _profiles = profiles);
   }
 
@@ -284,24 +276,19 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     setState(() => _loading = true);
     try {
       final url = '$base/api/v1/passport/auth/login';
-      final resp = await _dio.post(
-        url,
-        data: jsonEncode({'email': email, 'password': pwd}),
-      );
+      final resp = await _dio.post(url, data: jsonEncode({'email': email, 'password': pwd}));
 
       if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
         _toast('登录失败：HTTP ${resp.statusCode ?? 'unknown'}');
         return;
       }
 
-      final j = resp.data;
-      final a = _extractAuthData(j);
+      final a = _extractAuthData(resp.data);
       if (a.isEmpty) {
         _toast('登录成功但未找到 data.auth_data（返回结构不一致）');
         return;
       }
 
-      // cookie
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -335,8 +322,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       );
 
       _toast('登录成功（已写入历史）');
-
-      // 登录后自动刷新订阅
       await _fetchSubscribe(showToast: true);
     } catch (e) {
       _toast('错误：$e');
@@ -375,14 +360,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         return;
       }
 
-      final j = resp.data;
-      final sub = _extractSubscribeUrl(j);
+      final sub = _extractSubscribeUrl(resp.data);
       if (sub.isEmpty) {
         _toast('获取成功，但没有 data.subscribe_url');
         return;
       }
 
-      // set-cookie 更新
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -406,7 +389,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         profileId: pid,
       );
 
-      // 同步到历史
       if (pid.isNotEmpty) {
         final profiles = await _loadProfiles();
         final idx = profiles.indexWhere((x) => x.id == pid);
@@ -442,7 +424,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     Profile target;
 
     if (sameUrl.isNotEmpty) {
-      // 已存在：以第一条为基准，必要时重命名，并更新；其余重复删除
       target = sameUrl.first;
 
       final oldLabel = (target.label ?? '').trim();
@@ -458,14 +439,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         await globalState.appController.deleteProfile(dup.id);
       }
     } else {
-      // 不存在：创建（命名）+ 更新
       final created = Profile.normal(label: label, url: trimmed);
       await globalState.appController.addProfile(created);
       await globalState.appController.updateProfile(created);
       target = created;
     }
 
-    // 若它是当前订阅，则更新后立即应用
     if (ref.read(currentProfileIdProvider) == target.id) {
       await globalState.appController.applyProfile(silence: true);
     }
@@ -477,7 +456,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   }
 
   Future<void> _applyToFlClash() async {
-    // 先拉最新订阅
     await _fetchSubscribe(showToast: false);
     final sub = _lastSubscribeUrl;
     if (sub == null || sub.isEmpty) {
@@ -485,7 +463,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       return;
     }
 
-    // 写入 FlClash（去重/命名/更新/必要时应用）
     await _runWithScaffoldLoading(() async {
       await _importToFlClashDedupAndUpdate(sub);
     });
@@ -524,7 +501,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
 
   // ---------- dialogs ----------
   Future<void> _showLoginDialog() async {
-    // 弹窗里不想输入太长：给个默认值提示
     final canLogin = !_loading;
 
     await showDialog(
@@ -683,7 +659,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // 标题 + 历史按钮（保持你要的右上角历史）
         Row(
           children: [
             const Expanded(
@@ -705,7 +680,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         ),
         const SizedBox(height: 10),
 
-        // ✅ 卡片上只保留两个按钮
         Row(
           children: [
             Expanded(
@@ -725,7 +699,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         ),
         const SizedBox(height: 10),
 
-        // 状态行 + 手动刷新订阅（不弹窗）
         Row(
           children: [
             Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
@@ -752,7 +725,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
           ],
         ),
 
-        // 订阅信息（可复制）
         if (hasSub) ...[
           const SizedBox(height: 6),
           Align(
@@ -784,7 +756,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   }
 }
 
-/// 历史登录数据模型（只存 token/cookie/订阅，不存密码）
 class _LoginProfile {
   final String id;
   final String baseUrl;
