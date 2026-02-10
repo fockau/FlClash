@@ -1,0 +1,264 @@
+name: build-all-manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_android_split:
+        description: "Build Android split-per-abi (unsigned)"
+        type: boolean
+        default: true
+      build_android_universal:
+        description: "Build Android universal-release (all ABIs)"
+        type: boolean
+        default: true
+      build_linux:
+        description: "Build Linux desktop (setup.dart: deb/rpm/appimage)"
+        type: boolean
+        default: true
+      build_windows:
+        description: "Build Windows desktop (setup.dart: exe/zip)"
+        type: boolean
+        default: true
+      build_macos:
+        description: "Build macOS desktop (setup.dart: amd64/arm64)"
+        type: boolean
+        default: true
+
+jobs:
+  # ========== ANDROID SPLIT ==========
+  android_split:
+    if: ${{ inputs.build_android_split }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # 如果有 setup.dart，则先把 env 设成 stable（消掉右上角 pre）
+      - name: Setup env (stable)
+        if: ${{ hashFiles('setup.dart') != '' }}
+        run: dart setup.dart android --env stable
+
+      - name: Build Android split-per-abi (unsigned)
+        run: |
+          flutter build apk --release --split-per-abi
+
+          echo "== Flutter APK outputs =="
+          ls -l build/app/outputs/flutter-apk || true
+
+          mkdir -p dist/split
+
+          # 兼容 *-release-unsigned.apk 和 *-release.apk
+          find build/app/outputs/flutter-apk -maxdepth 1 -type f \
+            \( -name "app-*-release-unsigned.apk" -o -name "app-*-release.apk" \) \
+            -exec cp -v {} dist/split/ \;
+
+          echo "== Dist (split) =="
+          ls -l dist/split || true
+
+      - name: Upload Android split Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-unsigned-split
+          path: dist/split/*.apk
+          overwrite: true
+
+  # ========== ANDROID UNIVERSAL ==========
+  android_universal:
+    if: ${{ inputs.build_android_universal }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Setup env (stable)
+        if: ${{ hashFiles('setup.dart') != '' }}
+        run: dart setup.dart android --env stable
+
+      - name: Build Android universal-release (all ABIs)
+        run: |
+          # 你的原始写法，但去掉 android-x86（不再支持）
+          flutter build apk --release --target-platform=android-arm,android-arm64,android-x64
+
+          echo "== Flutter APK outputs =="
+          ls -l build/app/outputs/flutter-apk || true
+
+          mkdir -p dist
+
+          # 兼容不同 Gradle/Flutter 版本的输出命名（有的会带 -unsigned）
+          if [ -f build/app/outputs/flutter-apk/app-release-unsigned.apk ]; then
+            cp -v build/app/outputs/flutter-apk/app-release-unsigned.apk dist/app-universal-release.apk
+          else
+            cp -v build/app/outputs/flutter-apk/app-release.apk dist/app-universal-release.apk
+          fi
+
+          echo "== Dist contents =="
+          ls -l dist || true
+
+      - name: Upload Android universal Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-universal-release
+          path: dist/app-universal-release.apk
+          overwrite: true
+
+  # ========== LINUX (通过 setup.dart 打包 deb/rpm/appimage) ==========
+  linux:
+    if: ${{ inputs.build_linux }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # 让你的 setup.dart 负责构建 + 打包（linux-amd64.deb/rpm/appimage）
+      - name: Build Linux via setup.dart
+        run: |
+          dart setup.dart linux --arch amd64 --env stable
+
+          echo "== Dist (linux) =="
+          ls -R dist || true
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist/**
+          overwrite: true
+
+  # ========== WINDOWS (通过 setup.dart 打包 amd64/amd64-setup) ==========
+  windows:
+    if: ${{ inputs.build_windows }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        shell: pwsh
+        run: flutter pub get
+
+      - name: Build Windows via setup.dart
+        shell: pwsh
+        run: |
+          dart setup.dart windows --arch amd64 --env stable
+
+          Write-Host "== Dist (windows) =="
+          Get-ChildItem -Recurse dist
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist/**
+          overwrite: true
+
+  # ========== macOS (通过 setup.dart，同步构建 amd64 + arm64) ==========
+  macos:
+    if: ${{ inputs.build_macos }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            arch: amd64
+          - os: macos-latest
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build macOS via setup.dart
+        run: |
+          dart setup.dart macos --arch ${{ matrix.arch }} --env stable
+
+          echo "== Dist (macos-${{ matrix.arch }}) =="
+          ls -R dist || true
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/**
+          overwrite: true
+
