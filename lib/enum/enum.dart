@@ -305,7 +305,7 @@ enum DashboardWidget {
 
   /// ✅ 你的登录卡片（默认不显示：别加进 config.dart 的 defaultDashboardWidgets）
   loginCard(
-    GridItem(crossAxisCellCount: 4, child: LoginCard()),
+    GridItem(crossAxisCellCount: 8, child: LoginCard()),
     platforms: SupportPlatform.values,
   );
 
