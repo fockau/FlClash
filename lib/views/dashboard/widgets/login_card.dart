@@ -138,81 +138,13 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return base.startsWith('http://') || base.startsWith('https://');
   }
 
-  // ---------- token / dedupe ----------
-  // 32位 token：你给的例子是纯 hex，这里按 hex 32 位来（更精准，避免误判）。
-  // 如果你未来可能出现字母数字混合 32 位，把正则改成 [A-Za-z0-9]{32} 即可。
-  final RegExp _reHex32 = RegExp(r'^[0-9a-fA-F]{32}$');
-
-  String _extractToken32FromText(String s) {
-    final t = s.trim();
-    if (t.isEmpty) return '';
-    if (_reHex32.hasMatch(t)) return t.toLowerCase();
-    return '';
-  }
-
-  /// 从订阅 URL 中提取 32位 token（优先 query，其次 path 段）
-  String _extractTokenFromSubscribeUrl(String url) {
+  /// 订阅 URL 里提取 32 位 token（hex）
+  /// 例：.../aef9e256d71d088de9de937da388df93?... 或 query 里也可能出现
+  String _extract32Token(String url) {
     final u = url.trim();
     if (u.isEmpty) return '';
-    Uri? uri;
-    try {
-      uri = Uri.parse(u);
-    } catch (_) {
-      return '';
-    }
-
-    // 1) query 参数优先（常见：token / key / auth 等）
-    const keys = ['token', 'access_token', 'key', 'auth', 'uid', 'sid'];
-    for (final k in keys) {
-      final v = uri.queryParameters[k];
-      if (v == null) continue;
-      final tok = _extractToken32FromText(v);
-      if (tok.isNotEmpty) return tok;
-    }
-
-    // 2) path segments 里找 32位
-    for (final seg in uri.pathSegments) {
-      final tok = _extractToken32FromText(seg);
-      if (tok.isNotEmpty) return tok;
-    }
-
-    return '';
-  }
-
-  /// token 拿不到时，用一个“保守”的 URL 规范化做 fallback（避免把不同订阅误判成同一个）
-  String _normalizeUrlFallback(String url) {
-    final u = url.trim();
-    if (u.isEmpty) return '';
-    Uri? uri;
-    try {
-      uri = Uri.parse(u);
-    } catch (_) {
-      return u;
-    }
-
-    // fallback 时，只保留少量可能决定订阅身份的参数（尽量少，避免把不同订阅当成同一个）
-    const keepKeys = {'token', 'access_token', 'key', 'auth'};
-    final kept = <String, String>{};
-    uri.queryParameters.forEach((k, v) {
-      if (keepKeys.contains(k) && v.trim().isNotEmpty) kept[k] = v.trim();
-    });
-
-    // 去掉 fragment，避免无意义差异
-    final newUri = uri.replace(
-      fragment: '',
-      queryParameters: kept.isEmpty ? null : kept,
-    );
-    return newUri.toString();
-  }
-
-  /// 返回用于“同订阅去重”的 key
-  /// - 优先 token: token:<32位>
-  /// - 否则 url:<normalized>
-  String _buildDedupeKey(String subscribeUrl) {
-    final tok = _extractTokenFromSubscribeUrl(subscribeUrl);
-    if (tok.isNotEmpty) return 'token:$tok';
-    final nu = _normalizeUrlFallback(subscribeUrl);
-    return 'url:$nu';
+    final m = RegExp(r'([a-fA-F0-9]{32})').firstMatch(u);
+    return m?.group(1)?.toLowerCase() ?? '';
   }
 
   // ---------- storage ----------
@@ -591,83 +523,180 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   }
 
   // ---------- import to flclash (profilesProvider + appController) ----------
-  String _buildProfileLabel({
+  String _buildStableLabel({
     required String email,
     required String remark,
   }) {
     final r = remark.trim();
     if (r.isNotEmpty) return 'XBoard - $r';
-    if (email.trim().isNotEmpty) return 'XBoard - $email';
+    final e = email.trim();
+    if (e.isNotEmpty) return 'XBoard - $e';
     return 'XBoard 订阅';
   }
 
-  Future<void> _importOrUpdateSubscriptionIntoFlClash({
+  /// appController 兼容调用（不同版本函数签名可能不同，dynamic 兜底避免“又构建不了”）
+  dynamic get _ac => globalState.appController as dynamic;
+
+  Future<void> _acSetProfile(Profile p) async {
+    try {
+      await _ac.setProfile(p);
+    } catch (_) {
+      // 有些版本可能没有 setProfile，忽略即可
+    }
+  }
+
+  Future<void> _acAddProfile(Profile p) async {
+    try {
+      await _ac.addProfile(p);
+      return;
+    } catch (_) {}
+    // fallback：有些版本用 addProfileFormURL
+    try {
+      await _ac.addProfileFormURL(p.url);
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<void> _acDeleteProfile(Profile p) async {
+    try {
+      await _ac.deleteProfile(p.id);
+      return;
+    } catch (_) {}
+    try {
+      await _ac.deleteProfile(p);
+      return;
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<void> _acUpdateProfile(Profile p) async {
+    try {
+      await _ac.updateProfile(p);
+      return;
+    } catch (_) {}
+    try {
+      await _ac.updateProfile(p.id);
+      return;
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<void> _acApplyProfile({bool silence = true}) async {
+    try {
+      await _ac.applyProfile(silence: silence);
+      return;
+    } catch (_) {}
+    try {
+      await _ac.applyProfile();
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  /// token 去重：同 token 多条 -> 保留 1 条并更新，其余删除
+  /// - 更新失败会回滚 url（不会污染旧配置）
+  /// - 只在更新成功后删除重复项，避免“都删了结果失败”
+  Future<void> _importOrUpdateByToken({
     required String subscribeUrl,
-    required String label,
+    required String stableLabel,
   }) async {
     final scaffold = globalState.homeScaffoldKey.currentState;
 
-    final run = (Future<void> Function() job) async {
+    Future<void> run(Future<void> Function() job) async {
       if (scaffold?.mounted == true) {
         await scaffold!.loadingRun(job);
       } else {
         await job();
       }
-    };
+    }
 
     await run(() async {
       final url = subscribeUrl.trim();
       if (url.isEmpty) return;
 
-      final dedupeKey = _buildDedupeKey(url);
-
+      final token = _extract32Token(url);
       final profiles = ref.read(profilesProvider);
 
-      // 找到同订阅（同 token 优先；拿不到 token 才会变成 url:...）
-      final same = profiles.where((p) {
-        final pu = (p.url).trim();
-        if (pu.isEmpty) return false;
-        return _buildDedupeKey(pu) == dedupeKey;
-      }).toList();
+      // 只对 URL 订阅做匹配：Profile.type 在 model 里是用 url.isEmpty 判断的
+      List<Profile> matches;
+      if (token.isNotEmpty) {
+        matches = profiles
+            .where((p) => p.url.isNotEmpty && _extract32Token(p.url) == token)
+            .toList();
+      } else {
+        // 没 token 的极端情况：退化成整条 URL 匹配
+        matches = profiles.where((p) => p.url.trim() == url).toList();
+      }
 
       Profile target;
+      final nowLabel = stableLabel.trim();
 
-      if (same.isNotEmpty) {
-        // 已存在：以第一条为基准，必要时改名，并更新；其余重复删除
-        target = same.first;
+      if (matches.isNotEmpty) {
+        // 已存在：以第一条为基准
+        target = matches.first;
 
-        final want = label.trim();
-        if (want.isNotEmpty) {
-          final curLabel = (target.label ?? '').trim();
-          if (curLabel != want) {
-            final fixed = target.copyWith(label: want);
-            globalState.appController.setProfile(fixed);
-            target = fixed;
+        // 目标 label 为空时补稳定 label（避免后续自动变成“订阅名(1)”）
+        if (target.label.trim().isEmpty && nowLabel.isNotEmpty) {
+          final fixed = target.copyWith(label: nowLabel);
+          await _acSetProfile(fixed);
+          target = fixed;
+        }
+
+        // 为了确保 token 唯一：如当前 url 已不同，先改 url，再更新；失败则回滚 url
+        if (target.url.trim() != url) {
+          final old = target;
+          final changed = target.copyWith(url: url);
+          await _acSetProfile(changed);
+          try {
+            await _acUpdateProfile(changed);
+            target = changed;
+          } catch (e) {
+            // 回滚 url
+            await _acSetProfile(old);
+            rethrow;
+          }
+        } else {
+          // url 相同：直接更新（更新失败也不会覆盖旧文件）
+          await _acUpdateProfile(target);
+        }
+
+        // 更新成功后，删除重复项（保留 target）
+        for (final dup in matches.skip(1)) {
+          if (dup.id == target.id) continue;
+          try {
+            await _acDeleteProfile(dup);
+          } catch (_) {
+            // 删除失败不影响主流程（避免又因为某条删不掉导致整体失败）
           }
         }
-
-        await globalState.appController.updateProfile(target);
-
-        // 删除其余重复项，避免出现 (1)(2)(3)
-        for (final dup in same.skip(1)) {
-          await globalState.appController.deleteProfile(dup.id);
-        }
       } else {
-        // 不存在：创建（命名为 label）+ 更新
-        final created = Profile.normal(label: label.trim(), url: url);
-        await globalState.appController.addProfile(created);
-        await globalState.appController.updateProfile(created);
+        // 不存在：创建（用稳定 label），然后更新一次拉取配置
+        final created = Profile.normal(label: nowLabel, url: url);
+        await _acAddProfile(created);
+
+        // 有些版本 addProfile 只是入库不拉取，这里再 update 一次更稳
+        try {
+          await _acUpdateProfile(created);
+        } catch (_) {
+          // update 失败时也不删，留给用户手动处理即可
+        }
         target = created;
       }
 
-      // 若它是当前订阅，则更新后立即应用
-      if (ref.read(currentProfileIdProvider) == target.id) {
-        await globalState.appController.applyProfile(silence: true);
+      // 如果当前 profile 就是它，则更新后立即应用（减少“更新了但没生效”的困惑）
+      final curId = ref.read(currentProfileIdProvider);
+      if (curId == target.id) {
+        try {
+          await _acApplyProfile(silence: true);
+        } catch (_) {}
       }
 
       globalState.showMessage(
         title: '完成',
-        message: TextSpan(text: '订阅已导入并更新：${target.label ?? "XBoard"}'),
+        message: TextSpan(text: '订阅已导入并更新：${target.label.isEmpty ? "XBoard" : target.label}'),
       );
     });
   }
@@ -687,13 +716,13 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     final remark = cur.isNotEmpty ? cur.first.remark : '';
     final email = cur.isNotEmpty ? cur.first.email : _emailCtrl.text.trim();
 
-    final label = _buildProfileLabel(email: email, remark: remark);
+    final label = _buildStableLabel(email: email, remark: remark);
 
     try {
       setState(() => _loading = true);
-      await _importOrUpdateSubscriptionIntoFlClash(
+      await _importOrUpdateByToken(
         subscribeUrl: sub,
-        label: label,
+        stableLabel: label,
       );
       _toast('已导入并更新 FlClash 订阅');
     } catch (e) {
