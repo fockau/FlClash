@@ -1,24 +1,23 @@
+// ignore_for_file: use_build_context_synchronously, avoid_dynamic_calls
+
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:fl_clash/common/common.dart';
-import 'package:fl_clash/models/models.dart';
-import 'package:fl_clash/providers/providers.dart';
-import 'package:fl_clash/state.dart';
+import 'package:fl_clash/controller.dart';
 import 'package:fl_clash/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Dashboard 外层卡片（用于 enum.dart 的 DashboardWidget）
-class XBoardLoginDashboardCard extends ConsumerWidget {
+class XBoardLoginDashboardCard extends StatelessWidget {
   const XBoardLoginDashboardCard({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return SizedBox(
-      height: getWidgetHeight(2), // 大卡片高度
+      height: getWidgetHeight(2),
       child: CommonCard(
         info: const Info(label: 'XBoard', iconData: Icons.login),
         onPressed: () {},
@@ -31,29 +30,27 @@ class XBoardLoginDashboardCard extends ConsumerWidget {
   }
 }
 
-/// XBoard 登录卡片本体（不套 Card，外层已经是 CommonCard）
-class XBoardLoginCard extends ConsumerStatefulWidget {
+/// XBoard 登录卡片本体
+class XBoardLoginCard extends StatefulWidget {
   const XBoardLoginCard({super.key});
 
   @override
-  ConsumerState<XBoardLoginCard> createState() => _XBoardLoginCardState();
+  State<XBoardLoginCard> createState() => _XBoardLoginCardState();
 }
 
-class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
-  // 仅用于保存/回填（输入改在弹窗里）
+class _XBoardLoginCardState extends State<XBoardLoginCard> {
   final _baseUrlCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
 
   bool _loading = false;
 
-  String? _authData; // 例如 "Bearer xxx"
-  String? _cookie; // *_session=...
+  String? _authData;
+  String? _cookie;
   String? _lastSubscribeUrl;
   int _lastFetchedAtMs = 0;
 
   List<_LoginProfile> _profiles = [];
 
-  // Dio：单例化（更稳、更省）
   late final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 12),
@@ -88,6 +85,10 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return s;
   }
 
+  bool _validateBaseUrl(String base) {
+    return base.startsWith('http://') || base.startsWith('https://');
+  }
+
   String _fmtTime(int ms) {
     if (ms <= 0) return '-';
     final dt = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -116,15 +117,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return '';
   }
 
-  /// 从 set-cookie 里提取 session cookie（尽量泛化，不绑死 server_name）
   String _extractSessionCookieFromSetCookie(List<String> setCookies) {
     if (setCookies.isEmpty) return '';
-    // 优先找 *_session
     for (final c in setCookies) {
       final m = RegExp(r'([A-Za-z0-9_]+_session=[^;]+)').firstMatch(c);
       if (m != null) return m.group(1) ?? '';
     }
-    // fallback：取第一段 key=value
     final m2 = RegExp(r'^([^;]+)').firstMatch(setCookies.first);
     return m2?.group(1) ?? '';
   }
@@ -134,17 +132,15 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return s.codeUnits.fold<int>(0, (a, b) => (a * 131 + b) & 0x7fffffff).toString();
   }
 
-  bool _validateBaseUrl(String base) {
-    return base.startsWith('http://') || base.startsWith('https://');
+  /// 从订阅 URL 中提取 32 位 token（hex）
+  String _extractToken32(String url) {
+    final m = RegExp(r'([a-fA-F0-9]{32})').firstMatch(url);
+    return (m?.group(1) ?? '').toLowerCase();
   }
 
-  /// 订阅 URL 里提取 32 位 token（hex）
-  /// 例：.../aef9e256d71d088de9de937da388df93?... 或 query 里也可能出现
-  String _extract32Token(String url) {
-    final u = url.trim();
-    if (u.isEmpty) return '';
-    final m = RegExp(r'([a-fA-F0-9]{32})').firstMatch(u);
-    return m?.group(1)?.toLowerCase() ?? '';
+  bool _looksLikeDupSuffix(String label) {
+    // 常见： "xxx (1)" / "xxx（1）"
+    return RegExp(r'[\(（]\d+[\)）]\s*$').hasMatch(label.trim());
   }
 
   // ---------- storage ----------
@@ -217,9 +213,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     await _saveProfiles(profiles);
 
     final cur = sp.getString(_kCurrentProfileId) ?? '';
-    if (cur == p.id) {
-      await sp.setString(_kCurrentProfileId, '');
-    }
+    if (cur == p.id) await sp.setString(_kCurrentProfileId, '');
     if (mounted) setState(() => _profiles = profiles);
   }
 
@@ -303,29 +297,21 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                     controller: emailCtrl,
                     keyboardType: TextInputType.emailAddress,
                     decoration: const InputDecoration(labelText: '邮箱'),
-                    validator: (v) {
-                      if ((v ?? '').trim().isEmpty) return '请输入邮箱';
-                      return null;
-                    },
+                    validator: (v) => (v ?? '').trim().isEmpty ? '请输入邮箱' : null,
                   ),
                   const SizedBox(height: 10),
                   TextFormField(
                     controller: pwdCtrl,
                     obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: '密码（不会保存）',
-                    ),
-                    validator: (v) {
-                      if ((v ?? '').isEmpty) return '请输入密码';
-                      return null;
-                    },
+                    decoration: const InputDecoration(labelText: '密码（不会保存）'),
+                    validator: (v) => (v ?? '').isEmpty ? '请输入密码' : null,
                     onFieldSubmitted: (_) => submit(),
                   ),
                   const SizedBox(height: 10),
                   TextFormField(
                     controller: remarkCtrl,
                     decoration: const InputDecoration(
-                      labelText: '备注（用于订阅命名/去重）',
+                      labelText: '备注（用于订阅命名）',
                       hintText: '例如：主号 / 公司 / 备用',
                     ),
                   ),
@@ -382,14 +368,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         return;
       }
 
-      final j = resp.data;
-      final a = _extractAuthData(j);
+      final a = _extractAuthData(resp.data);
       if (a.isEmpty) {
         _toast('登录成功但未找到 data.auth_data（返回结构不一致）');
         return;
       }
 
-      // cookie
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -427,8 +411,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       );
 
       _toast('登录成功（已写入历史）');
-
-      // 登录后自动刷新订阅（不导入）
       await _fetchSubscribe(showToast: true);
     } catch (e) {
       _toast('错误：$e');
@@ -467,14 +449,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         return;
       }
 
-      final j = resp.data;
-      final sub = _extractSubscribeUrl(j);
+      final sub = _extractSubscribeUrl(resp.data);
       if (sub.isEmpty) {
         _toast('获取成功，但没有 data.subscribe_url');
         return;
       }
 
-      // set-cookie 更新
       final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
       if (raw != null) setCookies.addAll(raw);
@@ -498,7 +478,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
         profileId: pid,
       );
 
-      // 同步到历史
       if (pid.isNotEmpty) {
         final profiles = await _loadProfiles();
         final idx = profiles.indexWhere((x) => x.id == pid);
@@ -522,185 +501,114 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     }
   }
 
-  // ---------- import to flclash (profilesProvider + appController) ----------
-  String _buildStableLabel({
-    required String email,
-    required String remark,
-  }) {
-    final r = remark.trim();
-    if (r.isNotEmpty) return 'XBoard - $r';
-    final e = email.trim();
-    if (e.isNotEmpty) return 'XBoard - $e';
-    return 'XBoard 订阅';
+  // ---------- flclash profiles: best-effort token dedupe ----------
+  List<dynamic> _tryGetProfilesFromAppController() {
+    try {
+      final dynamic c = appController;
+      // 常见：c.profiles / c.state.profiles / c.config.profiles（不同版本可能不同）
+      final dynamic p1 = c.profiles;
+      if (p1 is List) return List<dynamic>.from(p1);
+      final dynamic st = c.state;
+      if (st != null) {
+        final dynamic p2 = st.profiles;
+        if (p2 is List) return List<dynamic>.from(p2);
+      }
+      final dynamic cfg = c.config;
+      if (cfg != null) {
+        final dynamic p3 = cfg.profiles;
+        if (p3 is List) return List<dynamic>.from(p3);
+      }
+    } catch (_) {}
+    return <dynamic>[];
   }
 
-  /// appController 兼容调用（不同版本函数签名可能不同，dynamic 兜底避免“又构建不了”）
-  dynamic get _ac => globalState.appController as dynamic;
-
-  Future<void> _acSetProfile(Profile p) async {
+  String _getProfileUrl(dynamic p) {
     try {
-      await _ac.setProfile(p);
+      final u = (p.url ?? '').toString();
+      return u;
     } catch (_) {
-      // 有些版本可能没有 setProfile，忽略即可
+      return '';
     }
   }
 
-  Future<void> _acAddProfile(Profile p) async {
+  String _getProfileLabel(dynamic p) {
     try {
-      await _ac.addProfile(p);
-      return;
-    } catch (_) {}
-    // fallback：有些版本用 addProfileFormURL
-    try {
-      await _ac.addProfileFormURL(p.url);
-    } catch (e) {
-      rethrow;
+      final l = (p.label ?? '').toString();
+      return l;
+    } catch (_) {
+      return '';
     }
   }
 
-  Future<void> _acDeleteProfile(Profile p) async {
+  String _getProfileId(dynamic p) {
     try {
-      await _ac.deleteProfile(p.id);
-      return;
-    } catch (_) {}
-    try {
-      await _ac.deleteProfile(p);
-      return;
-    } catch (e) {
-      rethrow;
+      final id = (p.id ?? '').toString();
+      return id;
+    } catch (_) {
+      return '';
     }
   }
 
-  Future<void> _acUpdateProfile(Profile p) async {
+  Future<void> _deleteProfileByIdBestEffort(String id) async {
+    if (id.trim().isEmpty) return;
+    final dynamic c = appController;
+    // 多版本兼容：尝试多种删除方法名
     try {
-      await _ac.updateProfile(p);
+      await c.deleteProfile(id);
       return;
     } catch (_) {}
     try {
-      await _ac.updateProfile(p.id);
-      return;
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  Future<void> _acApplyProfile({bool silence = true}) async {
-    try {
-      await _ac.applyProfile(silence: silence);
+      await c.removeProfile(id);
       return;
     } catch (_) {}
     try {
-      await _ac.applyProfile();
-    } catch (e) {
-      rethrow;
-    }
+      await c.delProfile(id);
+      return;
+    } catch (_) {}
+    try {
+      await c.deleteProfileById(id);
+      return;
+    } catch (_) {}
+    // 如果都不存在，就不删（避免崩）
   }
 
-  /// token 去重：同 token 多条 -> 保留 1 条并更新，其余删除
-  /// - 更新失败会回滚 url（不会污染旧配置）
-  /// - 只在更新成功后删除重复项，避免“都删了结果失败”
-  Future<void> _importOrUpdateByToken({
-    required String subscribeUrl,
-    required String stableLabel,
-  }) async {
-    final scaffold = globalState.homeScaffoldKey.currentState;
+  /// token 去重：保留 1 个，删除其余（尽量保留不带 (n) 的名字）
+  Future<int> _dedupeProfilesByToken(String token) async {
+    if (token.isEmpty) return 0;
+    final list = _tryGetProfilesFromAppController();
+    if (list.isEmpty) return 0;
 
-    Future<void> run(Future<void> Function() job) async {
-      if (scaffold?.mounted == true) {
-        await scaffold!.loadingRun(job);
-      } else {
-        await job();
+    final same = <dynamic>[];
+    for (final p in list) {
+      final u = _getProfileUrl(p);
+      if (u.isEmpty) continue;
+      final t = _extractToken32(u);
+      if (t == token) same.add(p);
+    }
+    if (same.length <= 1) return 0;
+
+    // 选择保留项：优先 label 不带 (n)
+    dynamic keep = same.first;
+    for (final p in same) {
+      final label = _getProfileLabel(p);
+      if (label.isNotEmpty && !_looksLikeDupSuffix(label)) {
+        keep = p;
+        break;
       }
     }
 
-    await run(() async {
-      final url = subscribeUrl.trim();
-      if (url.isEmpty) return;
-
-      final token = _extract32Token(url);
-      final profiles = ref.read(profilesProvider);
-
-      // 只对 URL 订阅做匹配：Profile.type 在 model 里是用 url.isEmpty 判断的
-      List<Profile> matches;
-      if (token.isNotEmpty) {
-        matches = profiles
-            .where((p) => p.url.isNotEmpty && _extract32Token(p.url) == token)
-            .toList();
-      } else {
-        // 没 token 的极端情况：退化成整条 URL 匹配
-        matches = profiles.where((p) => p.url.trim() == url).toList();
-      }
-
-      Profile target;
-      final nowLabel = stableLabel.trim();
-
-      if (matches.isNotEmpty) {
-        // 已存在：以第一条为基准
-        target = matches.first;
-
-        // 目标 label 为空时补稳定 label（避免后续自动变成“订阅名(1)”）
-        if (target.label.trim().isEmpty && nowLabel.isNotEmpty) {
-          final fixed = target.copyWith(label: nowLabel);
-          await _acSetProfile(fixed);
-          target = fixed;
-        }
-
-        // 为了确保 token 唯一：如当前 url 已不同，先改 url，再更新；失败则回滚 url
-        if (target.url.trim() != url) {
-          final old = target;
-          final changed = target.copyWith(url: url);
-          await _acSetProfile(changed);
-          try {
-            await _acUpdateProfile(changed);
-            target = changed;
-          } catch (e) {
-            // 回滚 url
-            await _acSetProfile(old);
-            rethrow;
-          }
-        } else {
-          // url 相同：直接更新（更新失败也不会覆盖旧文件）
-          await _acUpdateProfile(target);
-        }
-
-        // 更新成功后，删除重复项（保留 target）
-        for (final dup in matches.skip(1)) {
-          if (dup.id == target.id) continue;
-          try {
-            await _acDeleteProfile(dup);
-          } catch (_) {
-            // 删除失败不影响主流程（避免又因为某条删不掉导致整体失败）
-          }
-        }
-      } else {
-        // 不存在：创建（用稳定 label），然后更新一次拉取配置
-        final created = Profile.normal(label: nowLabel, url: url);
-        await _acAddProfile(created);
-
-        // 有些版本 addProfile 只是入库不拉取，这里再 update 一次更稳
-        try {
-          await _acUpdateProfile(created);
-        } catch (_) {
-          // update 失败时也不删，留给用户手动处理即可
-        }
-        target = created;
-      }
-
-      // 如果当前 profile 就是它，则更新后立即应用（减少“更新了但没生效”的困惑）
-      final curId = ref.read(currentProfileIdProvider);
-      if (curId == target.id) {
-        try {
-          await _acApplyProfile(silence: true);
-        } catch (_) {}
-      }
-
-      globalState.showMessage(
-        title: '完成',
-        message: TextSpan(text: '订阅已导入并更新：${target.label.isEmpty ? "XBoard" : target.label}'),
-      );
-    });
+    int deleted = 0;
+    for (final p in same) {
+      if (identical(p, keep)) continue;
+      final id = _getProfileId(p);
+      if (id.isEmpty) continue;
+      await _deleteProfileByIdBestEffort(id);
+      deleted++;
+    }
+    return deleted;
   }
 
+  // ✅ 导入订阅：复用 FlClash 官方入口 + token 去重
   Future<void> _updateAndImport() async {
     await _fetchSubscribe(showToast: false);
     final sub = _lastSubscribeUrl;
@@ -709,24 +617,42 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       return;
     }
 
-    // 备注来自“当前选中历史”（如果有）
-    final sp = await _sp();
-    final pid = sp.getString(_kCurrentProfileId) ?? '';
-    final cur = _profiles.where((e) => e.id == pid).toList();
-    final remark = cur.isNotEmpty ? cur.first.remark : '';
-    final email = cur.isNotEmpty ? cur.first.email : _emailCtrl.text.trim();
+    final url = sub.trim();
+    final token = _extractToken32(url);
 
-    final label = _buildStableLabel(email: email, remark: remark);
+    if (token.isEmpty) {
+      // 没 token，就只能按原始逻辑导入（否则你多订阅地址会误伤）
+      try {
+        setState(() => _loading = true);
+        await appController.addProfileFormURL(url);
+        _toast('已导入订阅（未检测到 token，无法去重）');
+      } catch (e) {
+        _toast('导入失败：$e');
+      } finally {
+        if (mounted) setState(() => _loading = false);
+      }
+      return;
+    }
 
     try {
       setState(() => _loading = true);
-      await _importOrUpdateByToken(
-        subscribeUrl: sub,
-        stableLabel: label,
-      );
-      _toast('已导入并更新 FlClash 订阅');
+
+      // 先导入（官方入口可能会生成 (1)(2)(3)）
+      await appController.addProfileFormURL(url);
+
+      // 给一点点时间让内部状态落盘（不同平台速度不同）
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      // token 去重，删除多余项
+      final deleted = await _dedupeProfilesByToken(token);
+
+      if (deleted > 0) {
+        _toast('已导入并去重：清理重复订阅 $deleted 条');
+      } else {
+        _toast('已导入订阅（未发现重复）');
+      }
     } catch (e) {
-      _toast('导入/更新失败：$e');
+      _toast('导入失败：$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -759,12 +685,11 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   void _showHistorySheet() {
     showModalBottomSheet(
       context: context,
-      showDragHandle: true,
       isScrollControlled: true,
       builder: (_) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -813,7 +738,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                           if (p.email.isNotEmpty) p.email else '(未记录邮箱)',
                           p.baseUrl,
                         ].join('  ·  ');
-
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
                           title: Text(title),
@@ -857,6 +781,32 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     _toast('已复制订阅链接');
   }
 
+  Widget _historyIconWithCount() {
+    final count = _profiles.length;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        const Icon(Icons.history),
+        if (count > 0)
+          Positioned(
+            right: -6,
+            top: -6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.redAccent,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '$count',
+                style: const TextStyle(fontSize: 10, color: Colors.white),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
@@ -877,17 +827,12 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
             IconButton(
               tooltip: '历史登录',
               onPressed: _loading ? null : _showHistorySheet,
-              icon: Badge(
-                isLabelVisible: _profiles.isNotEmpty,
-                label: Text('${_profiles.length}'),
-                child: const Icon(Icons.history),
-              ),
+              icon: _historyIconWithCount(),
             ),
           ],
         ),
         const SizedBox(height: 12),
 
-        // 两个按钮：登录 / 更新订阅并导入
         Row(
           children: [
             Expanded(
@@ -920,7 +865,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
 
         const SizedBox(height: 12),
 
-        // 状态栏
         Row(
           children: [
             Icon(loggedIn ? Icons.verified : Icons.info_outline, size: 18),
@@ -972,7 +916,6 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
   }
 }
 
-/// 登录弹窗数据（不存密码）
 class _LoginFormData {
   final String baseUrl;
   final String email;
@@ -987,7 +930,6 @@ class _LoginFormData {
   });
 }
 
-/// 历史登录数据模型（只存 token/cookie/订阅/备注，不存密码）
 class _LoginProfile {
   final String id;
   final String baseUrl;
