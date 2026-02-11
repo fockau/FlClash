@@ -1,4 +1,3 @@
-// ignore_for_file: use_build_context_synchronously
 
 import 'dart:convert';
 
@@ -10,7 +9,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Dashboard 外层卡片（用于 enum.dart 的 DashboardWidget）
 class XBoardLoginDashboardCard extends StatelessWidget {
   const XBoardLoginDashboardCard({super.key});
 
@@ -30,7 +28,6 @@ class XBoardLoginDashboardCard extends StatelessWidget {
   }
 }
 
-/// XBoard 登录卡片本体
 class XBoardLoginCard extends StatefulWidget {
   const XBoardLoginCard({super.key});
 
@@ -39,8 +36,8 @@ class XBoardLoginCard extends StatefulWidget {
 }
 
 class _XBoardLoginCardState extends State<XBoardLoginCard> {
-  final _baseUrlCtrl = TextEditingController();
-  final _emailCtrl = TextEditingController();
+  String _baseUrl = '';
+  String _email = '';
 
   bool _loading = false;
 
@@ -50,6 +47,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   int _lastFetchedAtMs = 0;
 
   List<_LoginProfile> _profiles = [];
+
+  SharedPreferences? _spCache;
 
   late final Dio _dio = Dio(
     BaseOptions(
@@ -68,26 +67,17 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   @override
   void initState() {
     super.initState();
-    _loadLocal();
+    _initLocal();
   }
 
-  @override
-  void dispose() {
-    _baseUrlCtrl.dispose();
-    _emailCtrl.dispose();
-    super.dispose();
-  }
-
-  // ---------- util ----------
   String _normBaseUrl(String s) {
     s = s.trim();
     while (s.endsWith('/')) s = s.substring(0, s.length - 1);
     return s;
   }
 
-  bool _validateBaseUrl(String base) {
-    return base.startsWith('http://') || base.startsWith('https://');
-  }
+  bool _validateBaseUrl(String base) =>
+      base.startsWith('http://') || base.startsWith('https://');
 
   String _fmtTime(int ms) {
     if (ms <= 0) return '-';
@@ -99,6 +89,16 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _runLoading(Future<void> Function() job) async {
+    if (_loading) return;
+    setState(() => _loading = true);
+    try {
+      await job();
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   String _extractAuthData(dynamic loginJson) {
@@ -132,13 +132,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return s.codeUnits.fold<int>(0, (a, b) => (a * 131 + b) & 0x7fffffff).toString();
   }
 
-  /// 从订阅 URL 中提取 32 位 token（hex）
-  String _extractToken32(String url) {
-    final m = RegExp(r'([a-fA-F0-9]{32})').firstMatch(url);
-    return (m?.group(1) ?? '').toLowerCase();
-  }
-
-  // ---------- storage ----------
   static const _kCurrentBaseUrl = 'xboard_current_baseUrl';
   static const _kCurrentAuthData = 'xboard_current_authData';
   static const _kCurrentCookie = 'xboard_current_cookie';
@@ -146,75 +139,40 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   static const _kCurrentProfileId = 'xboard_current_profile_id';
   static const _kProfiles = 'xboard_profiles_json';
 
-  /// ✅ token -> { profileId, url, atMs }
-  static const _kTokenProfileRegistry = 'xboard_token_profile_registry_v2';
+  Future<SharedPreferences> _sp() async {
+    final cached = _spCache;
+    if (cached != null) return cached;
+    final sp = await SharedPreferences.getInstance();
+    _spCache = sp;
+    return sp;
+  }
 
-  Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
-
-  Future<Map<String, dynamic>> _loadTokenRegistry() async {
+  Future<void> _initLocal() async {
     final sp = await _sp();
-    final s = sp.getString(_kTokenProfileRegistry);
-    if (s == null || s.isEmpty) return {};
-    try {
-      final j = jsonDecode(s);
-      if (j is Map<String, dynamic>) return j;
-      if (j is Map) return Map<String, dynamic>.from(j);
-    } catch (_) {}
-    return {};
+
+    final base = sp.getString(_kCurrentBaseUrl) ?? '';
+    final a = sp.getString(_kCurrentAuthData) ?? '';
+    final c = sp.getString(_kCurrentCookie) ?? '';
+    final sub = sp.getString(_kCurrentLastSubscribeUrl) ?? '';
+
+    final profiles = await _loadProfiles(sp);
+
+    final fallbackBase = profiles.isNotEmpty ? profiles.first.baseUrl : '';
+    final fallbackEmail = profiles.isNotEmpty ? profiles.first.email : '';
+
+    if (!mounted) return;
+    setState(() {
+      _baseUrl = base.isNotEmpty ? base : fallbackBase;
+      _email = fallbackEmail;
+
+      _authData = a.isEmpty ? null : a;
+      _cookie = c.isEmpty ? null : c;
+      _lastSubscribeUrl = sub.isEmpty ? null : sub;
+      _profiles = profiles;
+    });
   }
 
-  Future<void> _saveTokenRegistry(Map<String, dynamic> reg) async {
-    final sp = await _sp();
-    await sp.setString(_kTokenProfileRegistry, jsonEncode(reg));
-  }
-
-  Future<String?> _getProfileIdByToken(String token) async {
-    final reg = await _loadTokenRegistry();
-    final it = reg[token];
-    if (it is Map) {
-      final id = (it['profileId'] ?? '').toString();
-      return id.isEmpty ? null : id;
-    }
-    return null;
-  }
-
-  Future<void> _setProfileIdByToken({
-    required String token,
-    required String profileId,
-    required String url,
-  }) async {
-    final reg = await _loadTokenRegistry();
-    reg[token] = {
-      'profileId': profileId,
-      'url': url,
-      'atMs': DateTime.now().millisecondsSinceEpoch,
-    };
-    await _saveTokenRegistry(reg);
-  }
-
-  Future<void> _clearToken(String token) async {
-    final reg = await _loadTokenRegistry();
-    reg.remove(token);
-    await _saveTokenRegistry(reg);
-  }
-
-  Future<void> _saveCurrent({
-    required String baseUrl,
-    required String authData,
-    required String cookie,
-    required String lastSubscribeUrl,
-    required String profileId,
-  }) async {
-    final sp = await _sp();
-    await sp.setString(_kCurrentBaseUrl, baseUrl);
-    await sp.setString(_kCurrentAuthData, authData);
-    await sp.setString(_kCurrentCookie, cookie);
-    await sp.setString(_kCurrentLastSubscribeUrl, lastSubscribeUrl);
-    await sp.setString(_kCurrentProfileId, profileId);
-  }
-
-  Future<List<_LoginProfile>> _loadProfiles() async {
-    final sp = await _sp();
+  Future<List<_LoginProfile>> _loadProfiles(SharedPreferences sp) async {
     final s = sp.getString(_kProfiles);
     if (s == null || s.isEmpty) return [];
     try {
@@ -232,14 +190,13 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return [];
   }
 
-  Future<void> _saveProfiles(List<_LoginProfile> profiles) async {
-    final sp = await _sp();
+  Future<void> _saveProfiles(SharedPreferences sp, List<_LoginProfile> profiles) async {
     final list = profiles.map((e) => e.toJson()).toList();
     await sp.setString(_kProfiles, jsonEncode(list));
   }
 
-  Future<void> _upsertProfile(_LoginProfile p) async {
-    final profiles = await _loadProfiles();
+  Future<void> _upsertProfile(SharedPreferences sp, _LoginProfile p) async {
+    final profiles = await _loadProfiles(sp);
     final idx = profiles.indexWhere((x) => x.id == p.id);
     if (idx >= 0) {
       profiles[idx] = p;
@@ -247,160 +204,41 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       profiles.add(p);
     }
     profiles.sort((a, b) => b.savedAtMs.compareTo(a.savedAtMs));
-    await _saveProfiles(profiles);
+    await _saveProfiles(sp, profiles);
     if (mounted) setState(() => _profiles = profiles);
   }
 
-  Future<void> _deleteProfile(_LoginProfile p) async {
-    final sp = await _sp();
-    final profiles = await _loadProfiles();
+  Future<void> _deleteHistoryProfile(SharedPreferences sp, _LoginProfile p) async {
+    final profiles = await _loadProfiles(sp);
     profiles.removeWhere((x) => x.id == p.id);
-    await _saveProfiles(profiles);
+    await _saveProfiles(sp, profiles);
 
     final cur = sp.getString(_kCurrentProfileId) ?? '';
     if (cur == p.id) await sp.setString(_kCurrentProfileId, '');
+
     if (mounted) setState(() => _profiles = profiles);
   }
 
-  Future<void> _loadLocal() async {
-    final sp = await _sp();
-    final base = sp.getString(_kCurrentBaseUrl) ?? '';
-    final a = sp.getString(_kCurrentAuthData) ?? '';
-    final c = sp.getString(_kCurrentCookie) ?? '';
-    final sub = sp.getString(_kCurrentLastSubscribeUrl) ?? '';
-    final pid = sp.getString(_kCurrentProfileId) ?? '';
-
-    final profiles = await _loadProfiles();
-    final fallbackBase = profiles.isNotEmpty ? profiles.first.baseUrl : '';
-    _baseUrlCtrl.text = (base.isNotEmpty ? base : fallbackBase);
-    _emailCtrl.text = profiles.isNotEmpty ? profiles.first.email : '';
-
-    if (!mounted) return;
-    setState(() {
-      _authData = a.isEmpty ? null : a;
-      _cookie = c.isEmpty ? null : c;
-      _lastSubscribeUrl = sub.isEmpty ? null : sub;
-      _profiles = profiles;
-    });
-
-    if (pid.isNotEmpty && !_profiles.any((e) => e.id == pid)) {
-      await sp.setString(_kCurrentProfileId, '');
-    }
+  Future<void> _saveCurrent(
+    SharedPreferences sp, {
+    required String baseUrl,
+    required String authData,
+    required String cookie,
+    required String lastSubscribeUrl,
+    required String profileId,
+  }) async {
+    await sp.setString(_kCurrentBaseUrl, baseUrl);
+    await sp.setString(_kCurrentAuthData, authData);
+    await sp.setString(_kCurrentCookie, cookie);
+    await sp.setString(_kCurrentLastSubscribeUrl, lastSubscribeUrl);
+    await sp.setString(_kCurrentProfileId, profileId);
   }
 
-  // ---------- FlClash dynamic helpers (兼容不同版本，避免又构建不了) ----------
-  Future<void> _tryAwait(dynamic v) async {
-    if (v is Future) await v;
-  }
-
-  Future<bool> _tryDeleteProfileId(String id) async {
-    if (id.trim().isEmpty) return false;
-    final dynamic ac = appController;
-    try {
-      // 常见：deleteProfile(String id)
-      final r = ac.deleteProfile(id);
-      await _tryAwait(r);
-      return true;
-    } catch (_) {}
-    try {
-      // 可能：removeProfile(String id)
-      final r = ac.removeProfile(id);
-      await _tryAwait(r);
-      return true;
-    } catch (_) {}
-    try {
-      // 可能：deleteProfileById(String id)
-      final r = ac.deleteProfileById(id);
-      await _tryAwait(r);
-      return true;
-    } catch (_) {}
-    return false;
-  }
-
-  List<dynamic> _tryGetProfilesList() {
-    final dynamic ac = appController;
-
-    try {
-      final v = ac.profiles;
-      if (v is List) return v;
-    } catch (_) {}
-
-    try {
-      final st = ac.state;
-      final v = st.profiles;
-      if (v is List) return v;
-    } catch (_) {}
-
-    try {
-      final st = ac.currentState;
-      final v = st.profiles;
-      if (v is List) return v;
-    } catch (_) {}
-
-    try {
-      final v = ac.profileList;
-      if (v is List) return v;
-    } catch (_) {}
-
-    return const [];
-  }
-
-  String _dynGetString(dynamic obj, String key) {
-    try {
-      final v = obj[key];
-      return v?.toString() ?? '';
-    } catch (_) {}
-    try {
-      final v = (obj as dynamic).$key; // ignore: undefined_getter
-      return v?.toString() ?? '';
-    } catch (_) {}
-    try {
-      // 尝试 getter
-      final v = (obj as dynamic).get(key); // ignore: undefined_method
-      return v?.toString() ?? '';
-    } catch (_) {}
-    return '';
-  }
-
-  String _getProfileId(dynamic p) {
-    // 常见字段：id
-    try {
-      final v = (p as dynamic).id;
-      return v?.toString() ?? '';
-    } catch (_) {}
-    // 有的会是 profile.id
-    try {
-      final v = (p as dynamic).profile;
-      final id = (v as dynamic).id;
-      return id?.toString() ?? '';
-    } catch (_) {}
-    return '';
-  }
-
-  String _getProfileUrl(dynamic p) {
-    try {
-      final v = (p as dynamic).url;
-      return v?.toString() ?? '';
-    } catch (_) {}
-    try {
-      final v = (p as dynamic).profile;
-      final url = (v as dynamic).url;
-      return url?.toString() ?? '';
-    } catch (_) {}
-    // Map fallback
-    final s1 = _dynGetString(p, 'url');
-    if (s1.isNotEmpty) return s1;
-    return '';
-  }
-
-  // ---------- dialogs ----------
   Future<_LoginFormData?> _showLoginDialog() async {
-    final baseCtrl = TextEditingController(text: _baseUrlCtrl.text.trim());
-    final emailCtrl = TextEditingController(text: _emailCtrl.text.trim());
+    final baseCtrl = TextEditingController(text: _baseUrl);
+    final emailCtrl = TextEditingController(text: _email);
     final pwdCtrl = TextEditingController();
-    final remarkCtrl = TextEditingController(
-      text: _profiles.isNotEmpty ? _profiles.first.remark : '',
-    );
+    final remarkCtrl = TextEditingController(text: _profiles.isNotEmpty ? _profiles.first.remark : '');
 
     final formKey = GlobalKey<FormState>();
 
@@ -461,8 +299,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                   TextFormField(
                     controller: remarkCtrl,
                     decoration: const InputDecoration(
-                      labelText: '备注（用于订阅命名）',
-                      hintText: '例如：主号 / 公司 / 备用',
+                      labelText: '备注（可选）',
+                      hintText: '例如：主号 / 备用',
                     ),
                   ),
                 ],
@@ -471,14 +309,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
           ),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: submit,
-            child: const Text('登录'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('取消')),
+          FilledButton(onPressed: submit, child: const Text('登录')),
         ],
       ),
     );
@@ -490,8 +322,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return result;
   }
 
-  // ---------- network ----------
   Future<void> _loginWith(_LoginFormData f) async {
+    final sp = await _sp();
     final base = _normBaseUrl(f.baseUrl);
     final email = f.email.trim();
     final pwd = f.password;
@@ -505,13 +337,9 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       return;
     }
 
-    setState(() => _loading = true);
-    try {
+    await _runLoading(() async {
       final url = '$base/api/v1/passport/auth/login';
-      final resp = await _dio.post(
-        url,
-        data: jsonEncode({'email': email, 'password': pwd}),
-      );
+      final resp = await _dio.post(url, data: {'email': email, 'password': pwd});
 
       if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
         _toast('登录失败：HTTP ${resp.statusCode ?? 'unknown'}');
@@ -524,22 +352,20 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         return;
       }
 
-      final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
-      if (raw != null) setCookies.addAll(raw);
-      final cookie = _extractSessionCookieFromSetCookie(setCookies);
+      final cookie = _extractSessionCookieFromSetCookie(raw ?? const []);
 
       final pid = _makeProfileId(base, email);
 
-      _baseUrlCtrl.text = base;
-      _emailCtrl.text = email;
-
       setState(() {
+        _baseUrl = base;
+        _email = email;
         _authData = a;
         _cookie = cookie.isEmpty ? null : cookie;
       });
 
       await _saveCurrent(
+        sp,
         baseUrl: base,
         authData: a,
         cookie: cookie,
@@ -548,6 +374,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       );
 
       await _upsertProfile(
+        sp,
         _LoginProfile(
           id: pid,
           baseUrl: base,
@@ -560,17 +387,14 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         ),
       );
 
-      _toast('登录成功（已写入历史）');
+      _toast('登录成功');
       await _fetchSubscribe(showToast: true);
-    } catch (e) {
-      _toast('错误：$e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+    });
   }
 
   Future<void> _fetchSubscribe({required bool showToast}) async {
-    final base = _normBaseUrl(_baseUrlCtrl.text);
+    final sp = await _sp();
+    final base = _normBaseUrl(_baseUrl);
     final a = _authData;
 
     if (a == null || a.isEmpty) {
@@ -582,12 +406,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       return;
     }
 
-    setState(() => _loading = true);
-    try {
-      final headers = <String, dynamic>{
-        'Accept': 'application/json',
-        'Authorization': a,
-      };
+    await _runLoading(() async {
+      final headers = <String, dynamic>{'Accept': 'application/json', 'Authorization': a};
       final c = _cookie;
       if (c != null && c.isNotEmpty) headers['Cookie'] = c;
 
@@ -605,22 +425,19 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         return;
       }
 
-      final setCookies = <String>[];
       final raw = resp.headers.map['set-cookie'];
-      if (raw != null) setCookies.addAll(raw);
-      final newCookie = _extractSessionCookieFromSetCookie(setCookies);
+      final newCookie = _extractSessionCookieFromSetCookie(raw ?? const []);
       final finalCookie = newCookie.isNotEmpty ? newCookie : (_cookie ?? '');
 
-      if (!mounted) return;
       setState(() {
         _lastSubscribeUrl = sub;
         _cookie = finalCookie.isEmpty ? null : finalCookie;
         _lastFetchedAtMs = DateTime.now().millisecondsSinceEpoch;
       });
 
-      final sp = await _sp();
       final pid = sp.getString(_kCurrentProfileId) ?? '';
       await _saveCurrent(
+        sp,
         baseUrl: base,
         authData: a,
         cookie: finalCookie,
@@ -628,31 +445,11 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         profileId: pid,
       );
 
-      if (pid.isNotEmpty) {
-        final profiles = await _loadProfiles();
-        final idx = profiles.indexWhere((x) => x.id == pid);
-        if (idx >= 0) {
-          profiles[idx] = profiles[idx].copyWith(
-            cookie: finalCookie,
-            lastSubscribeUrl: sub,
-            savedAtMs: DateTime.now().millisecondsSinceEpoch,
-            authData: a,
-          );
-          await _saveProfiles(profiles);
-          if (mounted) setState(() => _profiles = profiles);
-        }
-      }
-
       if (showToast) _toast('已获取最新订阅链接');
-    } catch (e) {
-      _toast('错误：$e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+    });
   }
 
-  /// ✅ 关键：去重 = 删除旧的（同 token）再导入新的
-  Future<void> _updateAndImport() async {
+  Future<void> _importToFlClash() async {
     await _fetchSubscribe(showToast: false);
     final sub = _lastSubscribeUrl;
     if (sub == null || sub.trim().isEmpty) {
@@ -660,93 +457,25 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       return;
     }
 
-    final url = sub.trim();
-    final token = _extractToken32(url);
-
-    setState(() => _loading = true);
-    try {
-      if (token.isNotEmpty) {
-        // 1) 先尝试用 registry 里的 profileId 删除旧订阅
-        final oldId = await _getProfileIdByToken(token);
-        if (oldId != null) {
-          final ok = await _tryDeleteProfileId(oldId);
-          if (ok) {
-            await _clearToken(token); // 清掉旧记录，避免误判
-          }
-        }
-
-        // 2) 若 registry 删除失败/没有 id，再尝试从 appController 的 profiles 列表里找 url 含 token 的删掉
-        //    （不同版本入口不一样，这里是 best-effort，保证构建不炸）
-        final list = _tryGetProfilesList();
-        if (list.isNotEmpty) {
-          for (final p in list) {
-            final pUrl = _getProfileUrl(p);
-            if (pUrl.isNotEmpty && pUrl.toLowerCase().contains(token)) {
-              final pid = _getProfileId(p);
-              if (pid.isNotEmpty) {
-                await _tryDeleteProfileId(pid);
-              }
-            }
-          }
-        }
-      }
-
-      // 3) 导入新的
-      //    注意：addProfileFormURL 可能返回 void / Profile / id，不同版本不一样，这里用 dynamic 兼容
-      dynamic created;
-      try {
-        created = await (appController as dynamic).addProfileFormURL(url);
-      } catch (_) {
-        // fallback：正常调用（你当前版本里是存在的）
-        await appController.addProfileFormURL(url);
-      }
-
-      // 4) 记录新 profileId（如果能拿到）用于下次删除旧的
-      if (token.isNotEmpty) {
-        String newId = '';
-        try {
-          newId = (created as dynamic).id?.toString() ?? '';
-        } catch (_) {}
-        if (newId.isEmpty) {
-          // 再从 profiles 列表里找一次（best-effort）
-          final list = _tryGetProfilesList();
-          for (final p in list) {
-            final pUrl = _getProfileUrl(p);
-            if (pUrl.isNotEmpty && pUrl.toLowerCase().contains(token)) {
-              final pid = _getProfileId(p);
-              if (pid.isNotEmpty) {
-                newId = pid;
-                break;
-              }
-            }
-          }
-        }
-        if (newId.isNotEmpty) {
-          await _setProfileIdByToken(token: token, profileId: newId, url: url);
-        }
-      }
-
-      _toast('已导入订阅（已按 token 去重，旧订阅会被移除）');
-    } catch (e) {
-      _toast('导入失败：$e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+    await _runLoading(() async {
+      await appController.addProfileFormURL(sub.trim());
+      _toast('已导入订阅（不做去重/删除）');
+    });
   }
 
-  // ---------- history ----------
-  Future<void> _useProfile(_LoginProfile p) async {
-    _baseUrlCtrl.text = p.baseUrl;
-    _emailCtrl.text = p.email;
+  Future<void> _useHistory(_LoginProfile p) async {
+    final sp = await _sp();
 
-    if (!mounted) return;
     setState(() {
+      _baseUrl = p.baseUrl;
+      _email = p.email;
       _authData = p.authData;
       _cookie = p.cookie.isEmpty ? null : p.cookie;
       _lastSubscribeUrl = p.lastSubscribeUrl.isEmpty ? null : p.lastSubscribeUrl;
     });
 
     await _saveCurrent(
+      sp,
       baseUrl: p.baseUrl,
       authData: p.authData,
       cookie: p.cookie,
@@ -772,10 +501,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                 Row(
                   children: [
                     const Expanded(
-                      child: Text(
-                        '历史登录',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                      ),
+                      child: Text('历史登录',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                     ),
                     TextButton(
                       onPressed: _loading
@@ -808,9 +535,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                       separatorBuilder: (_, __) => const Divider(height: 1),
                       itemBuilder: (_, i) {
                         final p = _profiles[i];
-                        final remark = p.remark.trim();
                         final title = [
-                          if (remark.isNotEmpty) remark,
+                          if (p.remark.trim().isNotEmpty) p.remark.trim(),
                           if (p.email.isNotEmpty) p.email else '(未记录邮箱)',
                           p.baseUrl,
                         ].join('  ·  ');
@@ -826,15 +552,15 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                               ? null
                               : () async {
                                   Navigator.pop(context);
-                                  await _useProfile(p);
+                                  await _useHistory(p);
                                 },
                           trailing: IconButton(
                             tooltip: '删除',
                             onPressed: _loading
                                 ? null
                                 : () async {
-                                    await _deleteProfile(p);
-                                    if (mounted) setState(() {});
+                                    final sp = await _sp();
+                                    await _deleteHistoryProfile(sp, p);
                                   },
                             icon: const Icon(Icons.delete_outline),
                           ),
@@ -873,17 +599,13 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
                 color: Colors.redAccent,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Text(
-                '$count',
-                style: const TextStyle(fontSize: 10, color: Colors.white),
-              ),
+              child: Text('$count', style: const TextStyle(fontSize: 10, color: Colors.white)),
             ),
           ),
       ],
     );
   }
 
-  // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
     final loggedIn = (_authData != null && _authData!.isNotEmpty);
@@ -895,10 +617,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         Row(
           children: [
             const Expanded(
-              child: Text(
-                'XBoard',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-              ),
+              child: Text('XBoard', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             ),
             IconButton(
               tooltip: '历史登录',
@@ -927,13 +646,8 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             const SizedBox(width: 10),
             Expanded(
               child: FilledButton.tonal(
-                onPressed: (!loggedIn || _loading)
-                    ? null
-                    : () async {
-                        HapticFeedback.selectionClick();
-                        await _updateAndImport();
-                      },
-                child: Text(_loading ? '处理中…' : '更新订阅并导入'),
+                onPressed: (!loggedIn || _loading) ? null : _importToFlClash,
+                child: Text(_loading ? '处理中…' : '导入订阅'),
               ),
             ),
           ],
@@ -965,10 +679,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
           const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerLeft,
-            child: SelectableText(
-              _lastSubscribeUrl!,
-              style: const TextStyle(fontSize: 12),
-            ),
+            child: SelectableText(_lastSubscribeUrl!, style: const TextStyle(fontSize: 12)),
           ),
           const SizedBox(height: 6),
           Row(
@@ -1042,14 +753,13 @@ class _LoginProfile {
     if (j is! Map) return null;
     final id = (j['id'] ?? '').toString();
     final baseUrl = (j['baseUrl'] ?? '').toString();
-    final email = (j['email'] ?? '').toString();
     final authData = (j['authData'] ?? '').toString();
     if (id.isEmpty || baseUrl.isEmpty || authData.isEmpty) return null;
 
     return _LoginProfile(
       id: id,
       baseUrl: baseUrl,
-      email: email,
+      email: (j['email'] ?? '').toString(),
       remark: (j['remark'] ?? '').toString(),
       authData: authData,
       cookie: (j['cookie'] ?? '').toString(),
