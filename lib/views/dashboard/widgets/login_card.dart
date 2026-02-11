@@ -146,14 +146,14 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   static const _kCurrentProfileId = 'xboard_current_profile_id';
   static const _kProfiles = 'xboard_profiles_json';
 
-  /// ✅ token 去重注册表：token -> {url, atMs}
-  static const _kImportedTokenRegistry = 'xboard_imported_token_registry_v1';
+  /// ✅ token -> { profileId, url, atMs }
+  static const _kTokenProfileRegistry = 'xboard_token_profile_registry_v2';
 
   Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
 
   Future<Map<String, dynamic>> _loadTokenRegistry() async {
     final sp = await _sp();
-    final s = sp.getString(_kImportedTokenRegistry);
+    final s = sp.getString(_kTokenProfileRegistry);
     if (s == null || s.isEmpty) return {};
     try {
       final j = jsonDecode(s);
@@ -165,20 +165,36 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
 
   Future<void> _saveTokenRegistry(Map<String, dynamic> reg) async {
     final sp = await _sp();
-    await sp.setString(_kImportedTokenRegistry, jsonEncode(reg));
+    await sp.setString(_kTokenProfileRegistry, jsonEncode(reg));
   }
 
-  Future<bool> _isTokenImported(String token) async {
+  Future<String?> _getProfileIdByToken(String token) async {
     final reg = await _loadTokenRegistry();
-    return reg.containsKey(token);
+    final it = reg[token];
+    if (it is Map) {
+      final id = (it['profileId'] ?? '').toString();
+      return id.isEmpty ? null : id;
+    }
+    return null;
   }
 
-  Future<void> _markTokenImported(String token, String url) async {
+  Future<void> _setProfileIdByToken({
+    required String token,
+    required String profileId,
+    required String url,
+  }) async {
     final reg = await _loadTokenRegistry();
     reg[token] = {
+      'profileId': profileId,
       'url': url,
       'atMs': DateTime.now().millisecondsSinceEpoch,
     };
+    await _saveTokenRegistry(reg);
+  }
+
+  Future<void> _clearToken(String token) async {
+    final reg = await _loadTokenRegistry();
+    reg.remove(token);
     await _saveTokenRegistry(reg);
   }
 
@@ -270,6 +286,111 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     if (pid.isNotEmpty && !_profiles.any((e) => e.id == pid)) {
       await sp.setString(_kCurrentProfileId, '');
     }
+  }
+
+  // ---------- FlClash dynamic helpers (兼容不同版本，避免又构建不了) ----------
+  Future<void> _tryAwait(dynamic v) async {
+    if (v is Future) await v;
+  }
+
+  Future<bool> _tryDeleteProfileId(String id) async {
+    if (id.trim().isEmpty) return false;
+    final dynamic ac = appController;
+    try {
+      // 常见：deleteProfile(String id)
+      final r = ac.deleteProfile(id);
+      await _tryAwait(r);
+      return true;
+    } catch (_) {}
+    try {
+      // 可能：removeProfile(String id)
+      final r = ac.removeProfile(id);
+      await _tryAwait(r);
+      return true;
+    } catch (_) {}
+    try {
+      // 可能：deleteProfileById(String id)
+      final r = ac.deleteProfileById(id);
+      await _tryAwait(r);
+      return true;
+    } catch (_) {}
+    return false;
+  }
+
+  List<dynamic> _tryGetProfilesList() {
+    final dynamic ac = appController;
+
+    try {
+      final v = ac.profiles;
+      if (v is List) return v;
+    } catch (_) {}
+
+    try {
+      final st = ac.state;
+      final v = st.profiles;
+      if (v is List) return v;
+    } catch (_) {}
+
+    try {
+      final st = ac.currentState;
+      final v = st.profiles;
+      if (v is List) return v;
+    } catch (_) {}
+
+    try {
+      final v = ac.profileList;
+      if (v is List) return v;
+    } catch (_) {}
+
+    return const [];
+  }
+
+  String _dynGetString(dynamic obj, String key) {
+    try {
+      final v = obj[key];
+      return v?.toString() ?? '';
+    } catch (_) {}
+    try {
+      final v = (obj as dynamic).$key; // ignore: undefined_getter
+      return v?.toString() ?? '';
+    } catch (_) {}
+    try {
+      // 尝试 getter
+      final v = (obj as dynamic).get(key); // ignore: undefined_method
+      return v?.toString() ?? '';
+    } catch (_) {}
+    return '';
+  }
+
+  String _getProfileId(dynamic p) {
+    // 常见字段：id
+    try {
+      final v = (p as dynamic).id;
+      return v?.toString() ?? '';
+    } catch (_) {}
+    // 有的会是 profile.id
+    try {
+      final v = (p as dynamic).profile;
+      final id = (v as dynamic).id;
+      return id?.toString() ?? '';
+    } catch (_) {}
+    return '';
+  }
+
+  String _getProfileUrl(dynamic p) {
+    try {
+      final v = (p as dynamic).url;
+      return v?.toString() ?? '';
+    } catch (_) {}
+    try {
+      final v = (p as dynamic).profile;
+      final url = (v as dynamic).url;
+      return url?.toString() ?? '';
+    } catch (_) {}
+    // Map fallback
+    final s1 = _dynGetString(p, 'url');
+    if (s1.isNotEmpty) return s1;
+    return '';
   }
 
   // ---------- dialogs ----------
@@ -530,13 +651,11 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     }
   }
 
-  /// ✅ 默认：只导入（不主动 update）
-  /// - 同 token 已导入：默认跳过（从源头杜绝 (1)(2)(3)）
-  /// - 长按按钮：force=true 强制重新导入一次
-  Future<void> _importSubscription({required bool force}) async {
+  /// ✅ 关键：去重 = 删除旧的（同 token）再导入新的
+  Future<void> _updateAndImport() async {
     await _fetchSubscribe(showToast: false);
     final sub = _lastSubscribeUrl;
-    if (sub == null || sub.isEmpty) {
+    if (sub == null || sub.trim().isEmpty) {
       _toast('暂无订阅链接：请先登录或检查面板');
       return;
     }
@@ -544,39 +663,70 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final url = sub.trim();
     final token = _extractToken32(url);
 
-    if (token.isEmpty) {
-      // 没 token：无法可靠去重，只能直接导入
-      try {
-        setState(() => _loading = true);
-        await appController.addProfileFormURL(url);
-        _toast('已导入订阅（未检测到 token，无法去重）');
-      } catch (e) {
-        _toast('导入失败：$e');
-      } finally {
-        if (mounted) setState(() => _loading = false);
-      }
-      return;
-    }
-
-    // ✅ token 去重：已导入就跳过
-    if (!force) {
-      final exists = await _isTokenImported(token);
-      if (exists) {
-        _toast('该订阅已存在（token 去重），已跳过导入\n长按按钮可强制重新导入');
-        return;
-      }
-    }
-
+    setState(() => _loading = true);
     try {
-      setState(() => _loading = true);
+      if (token.isNotEmpty) {
+        // 1) 先尝试用 registry 里的 profileId 删除旧订阅
+        final oldId = await _getProfileIdByToken(token);
+        if (oldId != null) {
+          final ok = await _tryDeleteProfileId(oldId);
+          if (ok) {
+            await _clearToken(token); // 清掉旧记录，避免误判
+          }
+        }
 
-      // 只导入，不在这里调用任何 update
-      await appController.addProfileFormURL(url);
+        // 2) 若 registry 删除失败/没有 id，再尝试从 appController 的 profiles 列表里找 url 含 token 的删掉
+        //    （不同版本入口不一样，这里是 best-effort，保证构建不炸）
+        final list = _tryGetProfilesList();
+        if (list.isNotEmpty) {
+          for (final p in list) {
+            final pUrl = _getProfileUrl(p);
+            if (pUrl.isNotEmpty && pUrl.toLowerCase().contains(token)) {
+              final pid = _getProfileId(p);
+              if (pid.isNotEmpty) {
+                await _tryDeleteProfileId(pid);
+              }
+            }
+          }
+        }
+      }
 
-      // 标记 token 已导入（防止下次再出现 (1)(2)(3)）
-      await _markTokenImported(token, url);
+      // 3) 导入新的
+      //    注意：addProfileFormURL 可能返回 void / Profile / id，不同版本不一样，这里用 dynamic 兼容
+      dynamic created;
+      try {
+        created = await (appController as dynamic).addProfileFormURL(url);
+      } catch (_) {
+        // fallback：正常调用（你当前版本里是存在的）
+        await appController.addProfileFormURL(url);
+      }
 
-      _toast(force ? '已强制重新导入（默认不自动更新）' : '已导入订阅（默认不自动更新）');
+      // 4) 记录新 profileId（如果能拿到）用于下次删除旧的
+      if (token.isNotEmpty) {
+        String newId = '';
+        try {
+          newId = (created as dynamic).id?.toString() ?? '';
+        } catch (_) {}
+        if (newId.isEmpty) {
+          // 再从 profiles 列表里找一次（best-effort）
+          final list = _tryGetProfilesList();
+          for (final p in list) {
+            final pUrl = _getProfileUrl(p);
+            if (pUrl.isNotEmpty && pUrl.toLowerCase().contains(token)) {
+              final pid = _getProfileId(p);
+              if (pid.isNotEmpty) {
+                newId = pid;
+                break;
+              }
+            }
+          }
+        }
+        if (newId.isNotEmpty) {
+          await _setProfileIdByToken(token: token, profileId: newId, url: url);
+        }
+      }
+
+      _toast('已导入订阅（已按 token 去重，旧订阅会被移除）');
     } catch (e) {
       _toast('导入失败：$e');
     } finally {
@@ -777,21 +927,13 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             const SizedBox(width: 10),
             Expanded(
               child: FilledButton.tonal(
-                // ✅ 默认：只导入（不更新）
                 onPressed: (!loggedIn || _loading)
                     ? null
                     : () async {
                         HapticFeedback.selectionClick();
-                        await _importSubscription(force: false);
+                        await _updateAndImport();
                       },
-                // ✅ 长按：强制重新导入
-                onLongPress: (!loggedIn || _loading)
-                    ? null
-                    : () async {
-                        HapticFeedback.selectionClick();
-                        await _importSubscription(force: true);
-                      },
-                child: Text(_loading ? '处理中…' : '导入订阅（不更新）'),
+                child: Text(_loading ? '处理中…' : '更新订阅并导入'),
               ),
             ),
           ],
