@@ -17,7 +17,7 @@ class XBoardLoginDashboardCard extends StatelessWidget {
     return SizedBox(
       height: getWidgetHeight(2),
       child: CommonCard(
-        info: const Info(label: 'XBoard', iconData: Icons.login),
+        info: const Info(label: 'Board'),
         onPressed: () {},
         child: Padding(
           padding: baseInfoEdgeInsets.copyWith(top: 0),
@@ -617,7 +617,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
         Row(
           children: [
             const Expanded(
-              child: Text('XBoard', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              child: Text('自动获取机场最新订阅并更新', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             ),
             IconButton(
               tooltip: '历史登录',
