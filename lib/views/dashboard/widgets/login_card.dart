@@ -1,4 +1,4 @@
-// ignore_for_file: use_build_context_synchronously, avoid_dynamic_calls
+// ignore_for_file: use_build_context_synchronously
 
 import 'dart:convert';
 
@@ -138,11 +138,6 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     return (m?.group(1) ?? '').toLowerCase();
   }
 
-  bool _looksLikeDupSuffix(String label) {
-    // 常见： "xxx (1)" / "xxx（1）"
-    return RegExp(r'[\(（]\d+[\)）]\s*$').hasMatch(label.trim());
-  }
-
   // ---------- storage ----------
   static const _kCurrentBaseUrl = 'xboard_current_baseUrl';
   static const _kCurrentAuthData = 'xboard_current_authData';
@@ -151,7 +146,41 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
   static const _kCurrentProfileId = 'xboard_current_profile_id';
   static const _kProfiles = 'xboard_profiles_json';
 
+  /// ✅ token 去重注册表：token -> {url, atMs}
+  static const _kImportedTokenRegistry = 'xboard_imported_token_registry_v1';
+
   Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
+
+  Future<Map<String, dynamic>> _loadTokenRegistry() async {
+    final sp = await _sp();
+    final s = sp.getString(_kImportedTokenRegistry);
+    if (s == null || s.isEmpty) return {};
+    try {
+      final j = jsonDecode(s);
+      if (j is Map<String, dynamic>) return j;
+      if (j is Map) return Map<String, dynamic>.from(j);
+    } catch (_) {}
+    return {};
+  }
+
+  Future<void> _saveTokenRegistry(Map<String, dynamic> reg) async {
+    final sp = await _sp();
+    await sp.setString(_kImportedTokenRegistry, jsonEncode(reg));
+  }
+
+  Future<bool> _isTokenImported(String token) async {
+    final reg = await _loadTokenRegistry();
+    return reg.containsKey(token);
+  }
+
+  Future<void> _markTokenImported(String token, String url) async {
+    final reg = await _loadTokenRegistry();
+    reg[token] = {
+      'url': url,
+      'atMs': DateTime.now().millisecondsSinceEpoch,
+    };
+    await _saveTokenRegistry(reg);
+  }
 
   Future<void> _saveCurrent({
     required String baseUrl,
@@ -501,115 +530,10 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     }
   }
 
-  // ---------- flclash profiles: best-effort token dedupe ----------
-  List<dynamic> _tryGetProfilesFromAppController() {
-    try {
-      final dynamic c = appController;
-      // 常见：c.profiles / c.state.profiles / c.config.profiles（不同版本可能不同）
-      final dynamic p1 = c.profiles;
-      if (p1 is List) return List<dynamic>.from(p1);
-      final dynamic st = c.state;
-      if (st != null) {
-        final dynamic p2 = st.profiles;
-        if (p2 is List) return List<dynamic>.from(p2);
-      }
-      final dynamic cfg = c.config;
-      if (cfg != null) {
-        final dynamic p3 = cfg.profiles;
-        if (p3 is List) return List<dynamic>.from(p3);
-      }
-    } catch (_) {}
-    return <dynamic>[];
-  }
-
-  String _getProfileUrl(dynamic p) {
-    try {
-      final u = (p.url ?? '').toString();
-      return u;
-    } catch (_) {
-      return '';
-    }
-  }
-
-  String _getProfileLabel(dynamic p) {
-    try {
-      final l = (p.label ?? '').toString();
-      return l;
-    } catch (_) {
-      return '';
-    }
-  }
-
-  String _getProfileId(dynamic p) {
-    try {
-      final id = (p.id ?? '').toString();
-      return id;
-    } catch (_) {
-      return '';
-    }
-  }
-
-  Future<void> _deleteProfileByIdBestEffort(String id) async {
-    if (id.trim().isEmpty) return;
-    final dynamic c = appController;
-    // 多版本兼容：尝试多种删除方法名
-    try {
-      await c.deleteProfile(id);
-      return;
-    } catch (_) {}
-    try {
-      await c.removeProfile(id);
-      return;
-    } catch (_) {}
-    try {
-      await c.delProfile(id);
-      return;
-    } catch (_) {}
-    try {
-      await c.deleteProfileById(id);
-      return;
-    } catch (_) {}
-    // 如果都不存在，就不删（避免崩）
-  }
-
-  /// token 去重：保留 1 个，删除其余（尽量保留不带 (n) 的名字）
-  Future<int> _dedupeProfilesByToken(String token) async {
-    if (token.isEmpty) return 0;
-    final list = _tryGetProfilesFromAppController();
-    if (list.isEmpty) return 0;
-
-    final same = <dynamic>[];
-    for (final p in list) {
-      final u = _getProfileUrl(p);
-      if (u.isEmpty) continue;
-      final t = _extractToken32(u);
-      if (t == token) same.add(p);
-    }
-    if (same.length <= 1) return 0;
-
-    // 选择保留项：优先 label 不带 (n)
-    dynamic keep = same.first;
-    for (final p in same) {
-      final label = _getProfileLabel(p);
-      if (label.isNotEmpty && !_looksLikeDupSuffix(label)) {
-        keep = p;
-        break;
-      }
-    }
-
-    int deleted = 0;
-    for (final p in same) {
-      if (identical(p, keep)) continue;
-      final id = _getProfileId(p);
-      if (id.isEmpty) continue;
-      await _deleteProfileByIdBestEffort(id);
-      deleted++;
-    }
-    return deleted;
-  }
-
-  // ✅ 导入订阅：复用 FlClash 官方入口 + token 去重
-  Future<void> _updateAndImport() async {
+  /// ✅ 默认：只导入（不主动 update）
+  /// - 同 token 已导入：默认跳过（从源头杜绝 (1)(2)(3)）
+  /// - 长按按钮：force=true 强制重新导入一次
+  Future<void> _importSubscription({required bool force}) async {
     await _fetchSubscribe(showToast: false);
     final sub = _lastSubscribeUrl;
     if (sub == null || sub.isEmpty) {
@@ -621,7 +545,7 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
     final token = _extractToken32(url);
 
     if (token.isEmpty) {
-      // 没 token，就只能按原始逻辑导入（否则你多订阅地址会误伤）
+      // 没 token：无法可靠去重，只能直接导入
       try {
         setState(() => _loading = true);
         await appController.addProfileFormURL(url);
@@ -634,23 +558,25 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
       return;
     }
 
+    // ✅ token 去重：已导入就跳过
+    if (!force) {
+      final exists = await _isTokenImported(token);
+      if (exists) {
+        _toast('该订阅已存在（token 去重），已跳过导入\n长按按钮可强制重新导入');
+        return;
+      }
+    }
+
     try {
       setState(() => _loading = true);
 
-      // 先导入（官方入口可能会生成 (1)(2)(3)）
+      // 只导入，不在这里调用任何 update
       await appController.addProfileFormURL(url);
 
-      // 给一点点时间让内部状态落盘（不同平台速度不同）
-      await Future<void>.delayed(const Duration(milliseconds: 250));
+      // 标记 token 已导入（防止下次再出现 (1)(2)(3)）
+      await _markTokenImported(token, url);
 
-      // token 去重，删除多余项
-      final deleted = await _dedupeProfilesByToken(token);
-
-      if (deleted > 0) {
-        _toast('已导入并去重：清理重复订阅 $deleted 条');
-      } else {
-        _toast('已导入订阅（未发现重复）');
-      }
+      _toast(force ? '已强制重新导入（默认不自动更新）' : '已导入订阅（默认不自动更新）');
     } catch (e) {
       _toast('导入失败：$e');
     } finally {
@@ -851,13 +777,21 @@ class _XBoardLoginCardState extends State<XBoardLoginCard> {
             const SizedBox(width: 10),
             Expanded(
               child: FilledButton.tonal(
+                // ✅ 默认：只导入（不更新）
                 onPressed: (!loggedIn || _loading)
                     ? null
                     : () async {
                         HapticFeedback.selectionClick();
-                        await _updateAndImport();
+                        await _importSubscription(force: false);
                       },
-                child: Text(_loading ? '处理中…' : '更新订阅并导入'),
+                // ✅ 长按：强制重新导入
+                onLongPress: (!loggedIn || _loading)
+                    ? null
+                    : () async {
+                        HapticFeedback.selectionClick();
+                        await _importSubscription(force: true);
+                      },
+                child: Text(_loading ? '处理中…' : '导入订阅（不更新）'),
               ),
             ),
           ],
