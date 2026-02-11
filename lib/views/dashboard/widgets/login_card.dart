@@ -138,12 +138,81 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     return base.startsWith('http://') || base.startsWith('https://');
   }
 
-  /// ✅ 去重键：优先取 URL 里 32位 token（hex）。取不到则退回整个 url（尽量不误伤）
+  // ---------- token / dedupe ----------
+  // 32位 token：你给的例子是纯 hex，这里按 hex 32 位来（更精准，避免误判）。
+  // 如果你未来可能出现字母数字混合 32 位，把正则改成 [A-Za-z0-9]{32} 即可。
+  final RegExp _reHex32 = RegExp(r'^[0-9a-fA-F]{32}$');
+
+  String _extractToken32FromText(String s) {
+    final t = s.trim();
+    if (t.isEmpty) return '';
+    if (_reHex32.hasMatch(t)) return t.toLowerCase();
+    return '';
+  }
+
+  /// 从订阅 URL 中提取 32位 token（优先 query，其次 path 段）
+  String _extractTokenFromSubscribeUrl(String url) {
+    final u = url.trim();
+    if (u.isEmpty) return '';
+    Uri? uri;
+    try {
+      uri = Uri.parse(u);
+    } catch (_) {
+      return '';
+    }
+
+    // 1) query 参数优先（常见：token / key / auth 等）
+    const keys = ['token', 'access_token', 'key', 'auth', 'uid', 'sid'];
+    for (final k in keys) {
+      final v = uri.queryParameters[k];
+      if (v == null) continue;
+      final tok = _extractToken32FromText(v);
+      if (tok.isNotEmpty) return tok;
+    }
+
+    // 2) path segments 里找 32位
+    for (final seg in uri.pathSegments) {
+      final tok = _extractToken32FromText(seg);
+      if (tok.isNotEmpty) return tok;
+    }
+
+    return '';
+  }
+
+  /// token 拿不到时，用一个“保守”的 URL 规范化做 fallback（避免把不同订阅误判成同一个）
+  String _normalizeUrlFallback(String url) {
+    final u = url.trim();
+    if (u.isEmpty) return '';
+    Uri? uri;
+    try {
+      uri = Uri.parse(u);
+    } catch (_) {
+      return u;
+    }
+
+    // fallback 时，只保留少量可能决定订阅身份的参数（尽量少，避免把不同订阅当成同一个）
+    const keepKeys = {'token', 'access_token', 'key', 'auth'};
+    final kept = <String, String>{};
+    uri.queryParameters.forEach((k, v) {
+      if (keepKeys.contains(k) && v.trim().isNotEmpty) kept[k] = v.trim();
+    });
+
+    // 去掉 fragment，避免无意义差异
+    final newUri = uri.replace(
+      fragment: '',
+      queryParameters: kept.isEmpty ? null : kept,
+    );
+    return newUri.toString();
+  }
+
+  /// 返回用于“同订阅去重”的 key
+  /// - 优先 token: token:<32位>
+  /// - 否则 url:<normalized>
   String _buildDedupeKey(String subscribeUrl) {
-    final s = subscribeUrl.trim();
-    final m = RegExp(r'([a-fA-F0-9]{32})').firstMatch(s);
-    if (m != null) return (m.group(1) ?? '').toLowerCase();
-    return s;
+    final tok = _extractTokenFromSubscribeUrl(subscribeUrl);
+    if (tok.isNotEmpty) return 'token:$tok';
+    final nu = _normalizeUrlFallback(subscribeUrl);
+    return 'url:$nu';
   }
 
   // ---------- storage ----------
@@ -324,7 +393,7 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
                   TextFormField(
                     controller: remarkCtrl,
                     decoration: const InputDecoration(
-                      labelText: '备注（用于订阅命名）',
+                      labelText: '备注（用于订阅命名/去重）',
                       hintText: '例如：主号 / 公司 / 备用',
                     ),
                   ),
@@ -529,18 +598,9 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
     final r = remark.trim();
     if (r.isNotEmpty) return 'XBoard - $r';
     if (email.trim().isNotEmpty) return 'XBoard - $email';
-    return 'XBoard';
+    return 'XBoard 订阅';
   }
 
-  Profile _pickTarget(List<Profile> dups) {
-    // 优先：当前正在使用的 profile
-    final curId = ref.read(currentProfileIdProvider);
-    final cur = dups.where((p) => p.id == curId).toList();
-    if (cur.isNotEmpty) return cur.first;
-    return dups.first;
-  }
-
-  /// ✅ 两阶段提交：先更新验收成功，再改名/删重复；失败回滚到旧状态
   Future<void> _importOrUpdateSubscriptionIntoFlClash({
     required String subscribeUrl,
     required String label,
@@ -559,89 +619,56 @@ class _XBoardLoginCardState extends ConsumerState<XBoardLoginCard> {
       final url = subscribeUrl.trim();
       if (url.isEmpty) return;
 
-      final wantLabel = label.trim();
-      final key = _buildDedupeKey(url);
+      final dedupeKey = _buildDedupeKey(url);
 
       final profiles = ref.read(profilesProvider);
 
-      // 按 token-key 去重
-      final dups = profiles.where((p) {
+      // 找到同订阅（同 token 优先；拿不到 token 才会变成 url:...）
+      final same = profiles.where((p) {
         final pu = (p.url).trim();
         if (pu.isEmpty) return false;
-        return _buildDedupeKey(pu) == key;
+        return _buildDedupeKey(pu) == dedupeKey;
       }).toList();
 
-      bool isCurrent(Profile p) => ref.read(currentProfileIdProvider) == p.id;
+      Profile target;
 
-      Future<void> updateAndValidate(Profile p) async {
-        // 更新订阅（拉取 + 写入）
-        await globalState.appController.updateProfile(p);
-        // 如果它当前正在使用：更新后立即应用作为验收（失败会 throw）
-        if (isCurrent(p)) {
-          await globalState.appController.applyProfile(silence: true);
+      if (same.isNotEmpty) {
+        // 已存在：以第一条为基准，必要时改名，并更新；其余重复删除
+        target = same.first;
+
+        final want = label.trim();
+        if (want.isNotEmpty) {
+          final curLabel = (target.label ?? '').trim();
+          if (curLabel != want) {
+            final fixed = target.copyWith(label: want);
+            globalState.appController.setProfile(fixed);
+            target = fixed;
+          }
         }
-      }
 
-      if (dups.isNotEmpty) {
-        // ===== 已存在：更新 target，成功后删其它重复 =====
-        Profile target = _pickTarget(dups);
-        final Profile backup = target; // 备份用于回滚（尤其当前订阅时）
+        await globalState.appController.updateProfile(target);
 
-        try {
-          // 第一阶段：先更新+验收
-          await updateAndValidate(target);
-
-          // 第二阶段：成功后再改名（避免失败时 label 被改乱）
-          if (wantLabel.isNotEmpty) {
-            final curLabel = (target.label ?? '').trim();
-            if (curLabel != wantLabel) {
-              final fixed = target.copyWith(label: wantLabel);
-              globalState.appController.setProfile(fixed);
-              target = fixed;
-            }
-          }
-
-          // 第二阶段：成功后删除重复项（保留 target）
-          for (final dup in dups) {
-            if (dup.id == target.id) continue;
-            await globalState.appController.deleteProfile(dup.id);
-          }
-
-          globalState.showMessage(
-            title: '完成',
-            message: TextSpan(text: '订阅已导入并更新：${target.label ?? "XBoard"}'),
-          );
-          return;
-        } catch (e) {
-          // 回滚：尽最大努力恢复旧状态（尤其当前订阅）
-          try {
-            globalState.appController.setProfile(backup);
-            if (isCurrent(backup)) {
-              await globalState.appController.applyProfile(silence: true);
-            }
-          } catch (_) {}
-          rethrow;
+        // 删除其余重复项，避免出现 (1)(2)(3)
+        for (final dup in same.skip(1)) {
+          await globalState.appController.deleteProfile(dup.id);
         }
       } else {
-        // ===== 不存在：创建 -> 更新验收；失败则删除新建项 =====
-        final created = Profile.normal(label: wantLabel, url: url);
-        try {
-          await globalState.appController.addProfile(created);
-          await updateAndValidate(created);
-
-          globalState.showMessage(
-            title: '完成',
-            message: TextSpan(text: '订阅已导入并更新：${created.label ?? "XBoard"}'),
-          );
-          return;
-        } catch (e) {
-          // 清理失败的新订阅，避免留下坏配置或造成(1)(2)(3)
-          try {
-            await globalState.appController.deleteProfile(created.id);
-          } catch (_) {}
-          rethrow;
-        }
+        // 不存在：创建（命名为 label）+ 更新
+        final created = Profile.normal(label: label.trim(), url: url);
+        await globalState.appController.addProfile(created);
+        await globalState.appController.updateProfile(created);
+        target = created;
       }
+
+      // 若它是当前订阅，则更新后立即应用
+      if (ref.read(currentProfileIdProvider) == target.id) {
+        await globalState.appController.applyProfile(silence: true);
+      }
+
+      globalState.showMessage(
+        title: '完成',
+        message: TextSpan(text: '订阅已导入并更新：${target.label ?? "XBoard"}'),
+      );
     });
   }
 
