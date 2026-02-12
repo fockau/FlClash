@@ -316,10 +316,32 @@ enum DashboardWidget {
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
 
+  // -----------------------------
+  // ✅ 修复：重启后卡片消失
+  //
+  // 原因：原实现用 item.widget == gridItem 进行引用相等比较，
+  //       重启后恢复出来的 GridItem 是“新对象”，永远不等于 enum 里那份常量对象。
+  //
+  // 方案：用稳定特征匹配（child.runtimeType + crossAxisCellCount）
+  // -----------------------------
+
+  static bool _sameGrid(GridItem a, GridItem b) {
+    // crossAxisCellCount 能进一步减少误匹配（比如同一个 childType 在不同尺寸出现）
+    return a.crossAxisCellCount == b.crossAxisCellCount &&
+        a.child.runtimeType == b.child.runtimeType;
+  }
+
+  /// 返回可空：找不到时为 null（推荐新代码用这个，避免崩溃）
+  static DashboardWidget? tryGetDashboardWidget(GridItem gridItem) {
+    for (final w in DashboardWidget.values) {
+      if (_sameGrid(w.widget, gridItem)) return w;
+    }
+    return null;
+  }
+
+  /// 兼容旧调用：找不到时返回第一个（不会 index=-1 崩）
   static DashboardWidget getDashboardWidget(GridItem gridItem) {
-    final dashboardWidgets = DashboardWidget.values;
-    final index = dashboardWidgets.indexWhere((item) => item.widget == gridItem);
-    return dashboardWidgets[index];
+    return tryGetDashboardWidget(gridItem) ?? DashboardWidget.values.first;
   }
 }
 
