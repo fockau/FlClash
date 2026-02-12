@@ -315,28 +315,6 @@ enum DashboardWidget {
   final List<SupportPlatform> platforms;
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
-
-  /// ✅ 关键修复：不要用 `item.widget == gridItem` 这种“对象相等”
-  /// 因为 GridItem 里有 child Widget，每次启动都会新建实例，必然导致反查失败
-  /// 保存时识别失败 -> 下次恢复自然丢卡片
-  static DashboardWidget getDashboardWidget(GridItem gridItem) {
-    final dashboardWidgets = DashboardWidget.values;
-
-    // 1) 优先用稳定特征匹配：crossAxisCellCount + child.runtimeType
-    for (final item in dashboardWidgets) {
-      try {
-        if (item.widget.crossAxisCellCount == gridItem.crossAxisCellCount &&
-            item.widget.child.runtimeType == gridItem.child.runtimeType) {
-          return item;
-        }
-      } catch (_) {
-        // 如果 GridItem 结构变了（字段不可访问），就走下面兜底
-      }
-    }
-
-    // 2) 兜底：找不到也不能崩，否则恢复链路炸掉会导致“卡片/布局丢失”
-    return DashboardWidget.networkSpeed;
-  }
 }
 
 enum GeodataLoader { standard, memconservative }
@@ -364,7 +342,7 @@ enum RuleAction {
   IP_ASN('IP-ASN'),
   GEOIP('GEOIP'),
   SRC_GEOIP('SRC-GEOIP'),
-  SRC_IP_ASN('SRC-IP-ASN'), // ✅ 修正：必须是 SRC-IP-ASN
+  SRC_IP_ASN('SRC-IP-ASN'),
   SRC_IP_CIDR('SRC-IP-CIDR'),
   SRC_IP_SUFFIX('SRC-IP-SUFFIX'),
   DST_PORT('DST-PORT'),
@@ -416,10 +394,7 @@ extension RuleActionExt on RuleAction {
 
 enum OverrideRuleType { override, added }
 
-enum OverwriteType {
-  standard,
-  script,
-}
+enum OverwriteType { standard, script }
 
 enum RuleTarget { DIRECT, REJECT, MATCH }
 
