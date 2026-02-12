@@ -316,15 +316,26 @@ enum DashboardWidget {
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
 
+  /// ✅ 关键修复：不要用 `item.widget == gridItem` 这种“对象相等”
+  /// 因为 GridItem 里有 child Widget，每次启动都会新建实例，必然导致反查失败
+  /// 保存时识别失败 -> 下次恢复自然丢卡片
   static DashboardWidget getDashboardWidget(GridItem gridItem) {
     final dashboardWidgets = DashboardWidget.values;
-    final index = dashboardWidgets.indexWhere((item) => item.widget == gridItem);
 
-    // ✅ 修复：找不到不要崩（否则持久化恢复时会丢卡片/丢布局）
-    if (index == -1) {
-      return DashboardWidget.networkSpeed; // 兜底返回任意一个稳定卡片
+    // 1) 优先用稳定特征匹配：crossAxisCellCount + child.runtimeType
+    for (final item in dashboardWidgets) {
+      try {
+        if (item.widget.crossAxisCellCount == gridItem.crossAxisCellCount &&
+            item.widget.child.runtimeType == gridItem.child.runtimeType) {
+          return item;
+        }
+      } catch (_) {
+        // 如果 GridItem 结构变了（字段不可访问），就走下面兜底
+      }
     }
-    return dashboardWidgets[index];
+
+    // 2) 兜底：找不到也不能崩，否则恢复链路炸掉会导致“卡片/布局丢失”
+    return DashboardWidget.networkSpeed;
   }
 }
 
@@ -364,68 +375,4 @@ enum RuleAction {
   IN_NAME('IN-NAME'),
   PROCESS_PATH('PROCESS-PATH'),
   PROCESS_PATH_REGEX('PROCESS-PATH-REGEX'),
-  PROCESS_NAME('PROCESS-NAME'),
-  PROCESS_NAME_REGEX('PROCESS-NAME-REGEX'),
-  UID('UID'),
-  NETWORK('NETWORK'),
-  DSCP('DSCP'),
-  RULE_SET('RULE-SET'),
-  AND('AND'),
-  OR('OR'),
-  NOT('NOT'),
-  SUB_RULE('SUB-RULE'),
-  MATCH('MATCH');
-
-  final String value;
-
-  const RuleAction(this.value);
-
-  static List<RuleAction> get addedRuleActions {
-    return RuleAction.values
-        .where((item) => ![
-              RuleAction.MATCH,
-              RuleAction.RULE_SET,
-              RuleAction.SUB_RULE,
-            ].contains(item))
-        .toList();
-  }
-}
-
-extension RuleActionExt on RuleAction {
-  bool get hasParams => [
-        RuleAction.GEOIP,
-        RuleAction.IP_ASN,
-        RuleAction.SRC_IP_ASN,
-        RuleAction.IP_CIDR,
-        RuleAction.IP_CIDR6,
-        RuleAction.IP_SUFFIX,
-        RuleAction.RULE_SET,
-      ].contains(this);
-}
-
-enum OverrideRuleType { override, added }
-
-enum OverwriteType {
-  standard,
-  script,
-}
-
-enum RuleTarget { DIRECT, REJECT, MATCH }
-
-enum RestoreStrategy { compatible, override }
-
-enum CacheTag { logs, rules, requests, proxiesList }
-
-enum Language { yaml, javaScript, json }
-
-enum ImportOption { file, url }
-
-enum ScrollPositionCacheKey { tools, profiles, proxiesList, proxiesTabList }
-
-enum QueryTag { proxies, access }
-
-enum LoadingTag { profiles, backup_restore, access, proxies }
-
-enum CoreStatus { connecting, connected, disconnected }
-
-enum RuleScene { added, disabled, custom }
+  PROCESS
