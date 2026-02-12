@@ -242,7 +242,7 @@ enum ActionMethod {
   setupConfig,
   deleteFile,
 
-  /// Android
+  ///Android,
   setState,
   startTun,
   stopTun,
@@ -305,7 +305,7 @@ enum DashboardWidget {
   intranetIp(GridItem(crossAxisCellCount: 4, child: IntranetIP())),
   memoryInfo(GridItem(crossAxisCellCount: 4, child: MemoryInfo())),
 
-  /// XBoard 登录卡片（默认不显示：不要加进 defaultDashboardWidgets）
+  /// ✅ XBoard 登录卡片（默认不显示：不要加进 defaultDashboardWidgets）
   xboardLoginCard(
     GridItem(crossAxisCellCount: 8, child: XBoardLoginDashboardCard()),
     platforms: SupportPlatform.values,
@@ -316,30 +316,15 @@ enum DashboardWidget {
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
 
-  /// ✅ 修复：反序列化后的 GridItem 往往不是同一个对象，直接 `==` 很容易匹配失败，
-  /// 导致“保存了卡片但重启后消失”。
   static DashboardWidget getDashboardWidget(GridItem gridItem) {
-    final all = DashboardWidget.values;
+    final dashboardWidgets = DashboardWidget.values;
+    final index = dashboardWidgets.indexWhere((item) => item.widget == gridItem);
 
-    // 1) 原逻辑：如果 GridItem 实现了 ==，这里能直接命中
-    final idx1 = all.indexWhere((item) => item.widget == gridItem);
-    if (idx1 != -1) return all[idx1];
-
-    // 2) 签名匹配：用跨轴占格 + child 的类型来匹配（对持久化最稳定）
-    // 注意：这里用 dynamic 是为了避免 GridItem 字段名在未来版本变更导致编译挂掉。
-    final gi = gridItem as dynamic;
-    final giCount = gi.crossAxisCellCount;
-    final giChildType = gi.child.runtimeType;
-
-    final idx2 = all.indexWhere((item) {
-      final wi = item.widget as dynamic;
-      return wi.crossAxisCellCount == giCount &&
-          wi.child.runtimeType == giChildType;
-    });
-    if (idx2 != -1) return all[idx2];
-
-    // 3) 兜底：避免 index=-1 直接炸，至少不影响整个 dashboard 加载
-    return DashboardWidget.networkSpeed;
+    // ✅ 修复：找不到不要崩（否则持久化恢复时会丢卡片/丢布局）
+    if (index == -1) {
+      return DashboardWidget.networkSpeed; // 兜底返回任意一个稳定卡片
+    }
+    return dashboardWidgets[index];
   }
 }
 
@@ -368,8 +353,8 @@ enum RuleAction {
   IP_ASN('IP-ASN'),
   GEOIP('GEOIP'),
   SRC_GEOIP('SRC-GEOIP'),
-  SRC_IP_ASN('SRC-IP-ASN'),
-  SRC_IP_CIDR('SRC-IP-CIDR'), // ✅ 修正：必须是 SRC-IP-CIDR（横杠）
+  SRC_IP_ASN('SRC-IP-ASN'), // ✅ 修正：必须是 SRC-IP-ASN
+  SRC_IP_CIDR('SRC-IP-CIDR'),
   SRC_IP_SUFFIX('SRC-IP-SUFFIX'),
   DST_PORT('DST-PORT'),
   SRC_PORT('SRC-PORT'),
