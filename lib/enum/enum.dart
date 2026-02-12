@@ -242,7 +242,7 @@ enum ActionMethod {
   setupConfig,
   deleteFile,
 
-  ///Android,
+  /// Android
   setState,
   startTun,
   stopTun,
@@ -305,7 +305,7 @@ enum DashboardWidget {
   intranetIp(GridItem(crossAxisCellCount: 4, child: IntranetIP())),
   memoryInfo(GridItem(crossAxisCellCount: 4, child: MemoryInfo())),
 
-  /// ✅ XBoard 登录卡片（默认不显示：不要加进 defaultDashboardWidgets）
+  /// XBoard 登录卡片（默认不显示：不要加进 defaultDashboardWidgets）
   xboardLoginCard(
     GridItem(crossAxisCellCount: 8, child: XBoardLoginDashboardCard()),
     platforms: SupportPlatform.values,
@@ -316,50 +316,30 @@ enum DashboardWidget {
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
 
-  // ✅ 关键修复：不要再用 item.widget == gridItem（引用比较会导致重启后找不到）
-  // 这里用 “稳定特征签名” 进行匹配，且用 dynamic 规避 GridItem 字段名差异导致的编译失败。
-  static String _gridSignature(GridItem item) {
-    final d = item as dynamic;
-
-    int cross = -1;
-    try {
-      final v = d.crossAxisCellCount;
-      if (v is int) cross = v;
-    } catch (_) {}
-    try {
-      if (cross == -1) {
-        final v = d.crossAxisCount;
-        if (v is int) cross = v;
-      }
-    } catch (_) {}
-
-    Type childType = Object;
-    try {
-      final c = d.child;
-      if (c != null) childType = c.runtimeType;
-    } catch (_) {}
-    try {
-      if (childType == Object) {
-        final c = d.widget;
-        if (c != null) childType = c.runtimeType;
-      }
-    } catch (_) {}
-
-    return '$cross|$childType';
-  }
-
-  /// 返回可空：没找到就 null（推荐新代码用这个）
-  static DashboardWidget? tryGetDashboardWidget(GridItem gridItem) {
-    final sig = _gridSignature(gridItem);
-    for (final w in DashboardWidget.values) {
-      if (_gridSignature(w.widget) == sig) return w;
-    }
-    return null;
-  }
-
-  /// 兼容旧调用：找不到也不崩，直接兜底第一个
+  /// ✅ 修复：反序列化后的 GridItem 往往不是同一个对象，直接 `==` 很容易匹配失败，
+  /// 导致“保存了卡片但重启后消失”。
   static DashboardWidget getDashboardWidget(GridItem gridItem) {
-    return tryGetDashboardWidget(gridItem) ?? DashboardWidget.values.first;
+    final all = DashboardWidget.values;
+
+    // 1) 原逻辑：如果 GridItem 实现了 ==，这里能直接命中
+    final idx1 = all.indexWhere((item) => item.widget == gridItem);
+    if (idx1 != -1) return all[idx1];
+
+    // 2) 签名匹配：用跨轴占格 + child 的类型来匹配（对持久化最稳定）
+    // 注意：这里用 dynamic 是为了避免 GridItem 字段名在未来版本变更导致编译挂掉。
+    final gi = gridItem as dynamic;
+    final giCount = gi.crossAxisCellCount;
+    final giChildType = gi.child.runtimeType;
+
+    final idx2 = all.indexWhere((item) {
+      final wi = item.widget as dynamic;
+      return wi.crossAxisCellCount == giCount &&
+          wi.child.runtimeType == giChildType;
+    });
+    if (idx2 != -1) return all[idx2];
+
+    // 3) 兜底：避免 index=-1 直接炸，至少不影响整个 dashboard 加载
+    return DashboardWidget.networkSpeed;
   }
 }
 
@@ -388,8 +368,8 @@ enum RuleAction {
   IP_ASN('IP-ASN'),
   GEOIP('GEOIP'),
   SRC_GEOIP('SRC-GEOIP'),
-  SRC_IP_ASN('SRC-IP-ASN'), // ✅ 修正：必须是 SRC-IP-ASN
-  SRC_IP_CIDR('SRC-IP_CIDR'),
+  SRC_IP_ASN('SRC-IP-ASN'),
+  SRC_IP_CIDR('SRC-IP-CIDR'), // ✅ 修正：必须是 SRC-IP-CIDR（横杠）
   SRC_IP_SUFFIX('SRC-IP-SUFFIX'),
   DST_PORT('DST-PORT'),
   SRC_PORT('SRC-PORT'),
