@@ -315,6 +315,12 @@ enum DashboardWidget {
   final List<SupportPlatform> platforms;
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
+
+  static DashboardWidget getDashboardWidget(GridItem gridItem) {
+    final dashboardWidgets = DashboardWidget.values;
+    final index = dashboardWidgets.indexWhere((item) => item.widget == gridItem);
+    return dashboardWidgets[index];
+  }
 }
 
 enum GeodataLoader { standard, memconservative }
@@ -342,7 +348,7 @@ enum RuleAction {
   IP_ASN('IP-ASN'),
   GEOIP('GEOIP'),
   SRC_GEOIP('SRC-GEOIP'),
-  SRC_IP_ASN('SRC-IP-ASN'),
+  SRC_IP_ASN('SRC-IP-ASN'), // ✅ 修正：必须是 SRC-IP-ASN
   SRC_IP_CIDR('SRC-IP-CIDR'),
   SRC_IP_SUFFIX('SRC-IP-SUFFIX'),
   DST_PORT('DST-PORT'),
@@ -394,7 +400,10 @@ extension RuleActionExt on RuleAction {
 
 enum OverrideRuleType { override, added }
 
-enum OverwriteType { standard, script }
+enum OverwriteType {
+  standard,
+  script,
+}
 
 enum RuleTarget { DIRECT, REJECT, MATCH }
 
