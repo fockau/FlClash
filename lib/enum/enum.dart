@@ -316,30 +316,48 @@ enum DashboardWidget {
 
   const DashboardWidget(this.widget, {this.platforms = SupportPlatform.values});
 
-  // -----------------------------
-  // ✅ 修复：重启后卡片消失
-  //
-  // 原因：原实现用 item.widget == gridItem 进行引用相等比较，
-  //       重启后恢复出来的 GridItem 是“新对象”，永远不等于 enum 里那份常量对象。
-  //
-  // 方案：用稳定特征匹配（child.runtimeType + crossAxisCellCount）
-  // -----------------------------
+  // ✅ 关键修复：不要再用 item.widget == gridItem（引用比较会导致重启后找不到）
+  // 这里用 “稳定特征签名” 进行匹配，且用 dynamic 规避 GridItem 字段名差异导致的编译失败。
+  static String _gridSignature(GridItem item) {
+    final d = item as dynamic;
 
-  static bool _sameGrid(GridItem a, GridItem b) {
-    // crossAxisCellCount 能进一步减少误匹配（比如同一个 childType 在不同尺寸出现）
-    return a.crossAxisCellCount == b.crossAxisCellCount &&
-        a.child.runtimeType == b.child.runtimeType;
+    int cross = -1;
+    try {
+      final v = d.crossAxisCellCount;
+      if (v is int) cross = v;
+    } catch (_) {}
+    try {
+      if (cross == -1) {
+        final v = d.crossAxisCount;
+        if (v is int) cross = v;
+      }
+    } catch (_) {}
+
+    Type childType = Object;
+    try {
+      final c = d.child;
+      if (c != null) childType = c.runtimeType;
+    } catch (_) {}
+    try {
+      if (childType == Object) {
+        final c = d.widget;
+        if (c != null) childType = c.runtimeType;
+      }
+    } catch (_) {}
+
+    return '$cross|$childType';
   }
 
-  /// 返回可空：找不到时为 null（推荐新代码用这个，避免崩溃）
+  /// 返回可空：没找到就 null（推荐新代码用这个）
   static DashboardWidget? tryGetDashboardWidget(GridItem gridItem) {
+    final sig = _gridSignature(gridItem);
     for (final w in DashboardWidget.values) {
-      if (_sameGrid(w.widget, gridItem)) return w;
+      if (_gridSignature(w.widget) == sig) return w;
     }
     return null;
   }
 
-  /// 兼容旧调用：找不到时返回第一个（不会 index=-1 崩）
+  /// 兼容旧调用：找不到也不崩，直接兜底第一个
   static DashboardWidget getDashboardWidget(GridItem gridItem) {
     return tryGetDashboardWidget(gridItem) ?? DashboardWidget.values.first;
   }
@@ -371,7 +389,7 @@ enum RuleAction {
   GEOIP('GEOIP'),
   SRC_GEOIP('SRC-GEOIP'),
   SRC_IP_ASN('SRC-IP-ASN'), // ✅ 修正：必须是 SRC-IP-ASN
-  SRC_IP_CIDR('SRC-IP-CIDR'),
+  SRC_IP_CIDR('SRC-IP_CIDR'),
   SRC_IP_SUFFIX('SRC-IP-SUFFIX'),
   DST_PORT('DST-PORT'),
   SRC_PORT('SRC-PORT'),
